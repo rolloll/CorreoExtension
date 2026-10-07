@@ -1,0 +1,9 @@
+name = "correo-tracker"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+preview_urls = false
+
+# After `npx wrangler kv namespace create OPENS`, paste the printed id here.
+[[kv_namespaces]]
+binding = "OPENS"
+id = "b9f4b0f723104b019409c79b4918b73b"

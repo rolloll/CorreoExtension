@@ -1,0 +1,37 @@
+name: Release
+
+# Push a tag like v0.31.0 (must match public/manifest.json "version") and this
+# builds the extension and publishes dist/ as a zip on a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Tag must match manifest version
+        run: |
+          MANIFEST=$(node -p "require('./public/manifest.json').version")
+          if [ "v$MANIFEST" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} != manifest version v$MANIFEST" >&2
+            exit 1
+          fi
+      - run: npm run build
+      - name: Zip
+        run: cd dist && zip -r "../Correo-${GITHUB_REF_NAME}.zip" .
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" "Correo-${GITHUB_REF_NAME}.zip" \
+            --title "Correo ${GITHUB_REF_NAME}" --generate-notes

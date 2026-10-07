@@ -1,0 +1,288 @@
+/* Colors here mirror the "Industry" design-system tokens used by the rest
+   of the app (src/theme.css) — duplicated as literals since this file is
+   injected straight into the Gmail page, outside that stylesheet's scope. */
+
+.correo-badge-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+.correo-dtag {
+  font-family: "Barlow Condensed", "Segoe UI", sans-serif;
+  font-weight: 600;
+  font-size: 13px;
+  color: #416180;
+  vertical-align: middle;
+}
+
+/* Hidden until the row is hovered — the whole row is the trigger so it
+   works even on rows with no other Correo content (a hover target scoped
+   to just the (possibly empty) badge group would have zero size). */
+.correo-menu-btn {
+  display: none;
+  font-family: "Barlow", "Segoe UI", sans-serif;
+  font-weight: 600;
+  font-size: 12px;
+  padding: 3px 8px;
+  vertical-align: middle;
+  border: 1px solid color-mix(in srgb, #1d1f20 16%, transparent);
+  background: #ffffff;
+  color: #1d1f20;
+  cursor: pointer;
+}
+
+tr.zA:hover .correo-menu-btn {
+  display: inline-block;
+}
+
+.correo-menu-btn:hover {
+  background: color-mix(in srgb, #1d1f20 7%, transparent);
+}
+
+.correo-row-menu,
+.correo-label-popup {
+  position: fixed;
+  z-index: 2147483000;
+  background: #ffffff;
+  border: 1px solid color-mix(in srgb, #1d1f20 16%, transparent);
+  box-shadow: 0 12px 32px color-mix(in srgb, #2b2b2d 22%, transparent);
+  font-family: "Barlow", "Segoe UI", sans-serif;
+  font-size: 12px;
+}
+
+.correo-row-menu {
+  width: 200px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.correo-menu-item {
+  all: unset;
+  cursor: pointer;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 13px;
+  color: #1d1f20;
+}
+
+.correo-menu-item:hover:not(:disabled) {
+  background: color-mix(in srgb, #5980a6 10%, transparent);
+}
+
+.correo-menu-item:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.correo-row-menu-info {
+  border-top: 1px solid color-mix(in srgb, #1d1f20 16%, transparent);
+  margin-top: 3px;
+  padding: 5px 8px 2px;
+  font-size: 11px;
+  color: #7a7a7d;
+}
+
+.correo-label-popup {
+  width: 240px;
+  max-height: 280px;
+  display: flex;
+  flex-direction: column;
+}
+
+.correo-label-popup input {
+  margin: 6px;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, #1d1f20 16%, transparent);
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.correo-label-popup ul {
+  list-style: none;
+  margin: 0;
+  padding: 0 4px 6px;
+  overflow-y: auto;
+}
+
+.correo-label-popup li button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 5px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #1d1f20;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.correo-label-popup li button:hover {
+  background: color-mix(in srgb, #5980a6 10%, transparent);
+}
+
+.correo-label-popup-empty,
+.correo-label-popup-loading,
+.correo-label-popup-error {
+  padding: 8px 10px;
+  color: #7a7a7d;
+  font-size: 12px;
+}
+
+.correo-label-popup-error {
+  color: #b3261e;
+}
+
+/* Hides a label chip made redundant by a more specific "parent/child"
+   sibling chip in the same row (see hideRedundantLabelChips in content.ts).
+   Specificity matches Gmail's own div.ar.as selector so this doesn't need
+   !important to win, but the chip's own rule could still set display via a
+   more specific selector on Gmail's side, so !important is kept for safety
+   — consistent with the other Gmail-style overrides below. */
+div.ar.as.correo-label-chip-hidden {
+  display: none !important;
+}
+
+/* Gmail truncates the subject with an ellipsis at a fixed row height
+   (div.y6 > span.bog). Letting it wrap instead needs both the subject
+   span and its flex wrapper to grow — the row itself is a plain table
+   row (not virtualized), so a taller row just pushes the rest down. */
+div.y6 > span.bog {
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: unset !important;
+  display: block !important;
+  height: auto !important;
+}
+
+div.y6 {
+  height: auto !important;
+  overflow: visible !important;
+}
+
+/* Gmail's own wrapper one level up (div.xT) also pins a fixed height with
+   overflow:hidden — without freeing it too, wrapped text past ~2 lines
+   gets clipped by this ancestor instead of growing the row, and since the
+   clip boundary doesn't match the row's own box it looks like overlapping
+   garbled text rather than a clean cut. */
+div.xT:has(> div.y6) {
+  height: auto !important;
+  overflow: visible !important;
+}
+
+/* Slide-in Correo panel: a small tab docked to the right edge that expands
+   into an iframe of the extension's own app, as an alternative to opening
+   it in a separate tab/window. Closing happens from inside the app (the
+   rail's X button), which postMessages back to us. */
+#correo-side-toggle {
+  position: fixed;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  z-index: 2147483000;
+  writing-mode: vertical-rl;
+  border: 1px solid #5980a6;
+  border-right: none;
+  padding: 14px 7px;
+  background: #5980a6;
+  color: #f2f2f3;
+  font-family: "Barlow Condensed", "Segoe UI", sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  box-shadow: -2px 0 10px rgba(0, 0, 0, 0.18);
+}
+
+#correo-side-toggle:hover {
+  background: #597ea3;
+}
+
+#correo-side-toggle.correo-side-toggle-hidden {
+  display: none;
+}
+
+#correo-side-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100%;
+  max-width: 92vw;
+  background: #f2f2f3;
+  box-shadow: -6px 0 28px rgba(0, 0, 0, 0.28);
+  z-index: 2147483000;
+  transform: translateX(100%);
+  transition: transform 0.2s ease;
+}
+
+#correo-side-panel.correo-side-panel-open {
+  transform: translateX(0);
+}
+
+/* Width is dragged live via inline style; suppress the slide transition
+   while resizing so the panel doesn't lag behind the cursor. */
+#correo-side-panel.correo-side-panel-resizing {
+  transition: none;
+}
+
+.correo-side-panel-resize {
+  position: absolute;
+  top: 0;
+  left: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+}
+
+.correo-side-panel-resize:hover,
+.correo-side-panel-resizing .correo-side-panel-resize {
+  background: rgba(89, 128, 166, 0.35);
+}
+
+.correo-side-panel-frame {
+  border: none;
+  width: 100%;
+  height: 100%;
+}
+
+.correo-read {
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 5px;
+  border: 1px solid #c8ced6;
+  color: #5b6672;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.correo-read.on {
+  background: #5980a6;
+  border-color: #5980a6;
+  color: #fff;
+}
+
+/* Mail addressed to me directly (To, regardless of who is on Cc). */
+tr.zA.correo-to-me > td {
+  background-color: #e3ebf3 !important;
+}
+
+tr.zA.correo-to-me > td:first-child {
+  box-shadow: inset 4px 0 0 #5980a6;
+}
+
+tr.zA.correo-to-me:hover > td {
+  background-color: #d4e1ee !important;
+}
+
+tr.zA.correo-to-me .bog,
+tr.zA.correo-to-me .yW span {
+  font-weight: 700;
+}

@@ -1,0 +1,48 @@
+From: "Jane Sender" <jane@example.com>
+To: "John Receiver" <john@example.com>
+Cc: "Team" <team@example.com>
+Subject: Correo 테스트 메일 (HTML + 첨부)
+Date: Wed, 16 Sep 2026 10:30:00 +0900
+Message-ID: <test-1234@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="OUTER-BOUNDARY"
+
+--OUTER-BOUNDARY
+Content-Type: multipart/related; boundary="RELATED-BOUNDARY"
+
+--RELATED-BOUNDARY
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+<html>
+<body style="font-family: Arial, sans-serif; color: #222;">
+<h1 style="color:#3d6bff;">안녕하세요!</h1>
+<p>이것은 <b>Correo</b> 뷰어 테스트를 위한 <i>HTML 이메일</i>입니다.</p>
+<p>아래는 인라인 이미지입니다:</p>
+<img src="cid:logo123" alt="inline logo" width="120" />
+<p>그리고 원격 이미지(추적 픽셀 차단 테스트):</p>
+<img src="https://example.com/tracker.png" width="1" height="1" />
+<p><a href="https://www.rust-lang.org">Rust 웹사이트로 이동</a></p>
+</body>
+</html>
+
+--RELATED-BOUNDARY
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-ID: <logo123>
+Content-Disposition: inline; filename="logo.png"
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY
+42YAAAAASUVORK5CYII=
+
+--RELATED-BOUNDARY--
+
+--OUTER-BOUNDARY
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+Content-Disposition: attachment; filename="note.txt"
+
+이것은 첨부파일로 들어간 텍스트 노트입니다.
+Correo 테스트용 첨부파일입니다.
+
+--OUTER-BOUNDARY--
