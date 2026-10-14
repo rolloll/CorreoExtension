@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Correo",
-  "version": "0.31.0",
+  "version": "0.31.1",
   "description": "가벼운 .eml 뷰어 + Gmail 라벨/답장 관리 + 주소록",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArqUw9a4aMTUrGX5oYyvmdx8DguEs9YK3pKdOLS8ly1gUHD/gJPKXQz4Ix0R4KWb14JPmaXccgXlNrEFW2yqQ1USO7o3YX0tH9EJz6h9v7ZJnfO06WKiKPtxQ3x89sGSB1zlsSK8486R82YX3cWCsyYLJJWIjNpLFBFAmPqjmApRnvFeDOr1TOXx6hQjcGLh0+bYmxnCzDa++4ylof9x1yGOJ5SfJV2Xj/ajHay4Q2fQDay1wqNiQpEx+cBEAy+tkLZISNTxDGQANvX7bmp5xA+ycrj16cRRvhZzWpwJliZh1jLLw4MBJEjnwPVTqrysx2Eit3Za9kbIODSUJp8uaXQIDAQAB",
   "icons": {

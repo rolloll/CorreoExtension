@@ -282,7 +282,9 @@ tr.zA.correo-to-me:hover > td {
   background-color: #d4e1ee !important;
 }
 
-tr.zA.correo-to-me .bog,
-tr.zA.correo-to-me .yW span {
+/* Bold only while unread (Gmail marks unread rows with .zE); read rows keep
+   Gmail's normal weight. */
+tr.zA.zE.correo-to-me .bog,
+tr.zA.zE.correo-to-me .yW span {
   font-weight: 700;
 }
