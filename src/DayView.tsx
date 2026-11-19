@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { listMessagesInRange, type DayMessage, type RangeStats } from "./gmail/api";
+import { loadAliasConfig, normalizeAddress } from "./aliases";
+import { loadAddressInfo, listMessagesInRange, type DayMessage, type RangeStats } from "./gmail/api";
 import { loadTrackerConfig, loadTracked, fetchHits, findTracked, realHits } from "./tracking";
 import { downloadExport, type ExportFormat, type ExportOptions } from "./exportMessages";
 import { activeProvider, loadAiConfig, providerLabel } from "./aiProviders";
@@ -40,6 +41,9 @@ export default function DayView() {
   const [messages, setMessages] = useState<DayMessage[] | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "" = every address of mine; otherwise one account (primary or alias).
+  const [account, setAccount] = useState("");
+  const [myAccounts, setMyAccounts] = useState<string[]>([]);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("csv");
   const [withSummary, setWithSummary] = useState(false);
   const [summarizing, setSummarizing] = useState<{ done: number; total: number } | null>(null);
@@ -57,6 +61,14 @@ export default function DayView() {
 
   useEffect(() => {
     loadGroups().then(setGroups).catch(() => {});
+    // The connected Gmail account plus its send-as aliases and the extras added in 설정.
+    Promise.all([loadAddressInfo(), loadAliasConfig()])
+      .then(([info, cfg]) => {
+        const excluded = new Set(cfg.excluded.map(normalizeAddress));
+        const list = [info.primary, ...info.sendAs.filter((a) => !excluded.has(a)), ...cfg.extra.map(normalizeAddress)];
+        setMyAccounts([...new Set(list)]);
+      })
+      .catch(() => {});
   }, []);
 
   // Debounce typing so each keystroke doesn't trigger a Gmail search.
@@ -73,6 +85,7 @@ export default function DayView() {
     setProgress(null);
     setStats(null);
     listMessagesInRange(from, to, sender, {
+      account,
       isCancelled: () => cancelled,
       onProgress: (done, total) => !cancelled && setProgress({ done, total }),
     })
@@ -87,7 +100,7 @@ export default function DayView() {
     return () => {
       cancelled = true;
     };
-  }, [from, to, valid, sender]);
+  }, [from, to, valid, sender, account]);
 
   async function loadReads(msgs: DayMessage[], isCancelled: () => boolean) {
     try {
@@ -214,10 +227,26 @@ export default function DayView() {
         <input type="date" className="dv-date" value={to} max={todayStr} onChange={(e) => changeTo(e.target.value)} />
       </div>
       <div className="dv-picker">
+        <select
+          className="dv-date"
+          value={account}
+          onChange={(e) => setAccount(e.target.value)}
+          aria-label="내 계정"
+          title="이 계정으로 받았거나 이 계정에서 보낸 메일만 봅니다"
+        >
+          <option value="">내 계정: 전체 (받은 메일 + 보낸 메일)</option>
+          {myAccounts.map((a) => (
+            <option key={a} value={a}>
+              {a}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="dv-picker">
         <input
           type="text"
           className="dv-date"
-          placeholder="보낸 사람 (이름 또는 주소) — 비우면 전체"
+          placeholder="상대방 (보낸·받는 사람 이름 또는 주소) — 비우면 전체"
           value={senderInput}
           onChange={(e) => setSenderInput(e.target.value)}
         />

@@ -1,3 +1,4 @@
+import { buildRangeQuery, matchesAccount, matchesCounterpart } from "../rangeFilter";
 import { getAuthToken } from "./auth";
 import { loadAliasConfig, normalizeAddress } from "../aliases";
 import type {
@@ -482,6 +483,11 @@ interface ThreadGetResponse {
   messages?: MessageMeta[];
 }
 
+// Every value of a header that can repeat (Delivered-To appears once per hop).
+function headerValues(msg: MessageMeta, name: string): string[] {
+  return (msg.payload?.headers ?? []).filter((h) => h.name.toLowerCase() === name.toLowerCase()).map((h) => h.value);
+}
+
 function headerValue(msg: MessageMeta, name: string): string | undefined {
   return msg.payload?.headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value;
 }
@@ -530,7 +536,7 @@ async function loadMyAddresses(): Promise<{ primary: string; all: Set<string> }>
   return { primary: info.primary, all };
 }
 
-const SENDER_HEADERS = ["From", "To", "Cc", "Subject", "X-Original-Sender", "X-Original-From", "List-Id"];
+const SENDER_HEADERS = ["From", "To", "Cc", "Subject", "X-Original-Sender", "X-Original-From", "List-Id", "Delivered-To"];
 
 // The message's real author addresses. Mail reflected by a mailing list / Google
 // Group carries the group's address in From; the true sender is in
@@ -912,17 +918,22 @@ export interface RangeStats {
 }
 
 export interface RangeOptions {
+  // One of my own addresses: only mail received at it or sent from it.
+  account?: string;
   isCancelled?: () => boolean;
   onProgress?: (done: number, total: number) => void;
 }
 
 // Message headers never change, so they're kept between visits: re-opening a
 // range (or widening it) only fetches the messages not seen before.
-const RANGE_CACHE_KEY = "correo_range_meta_cache";
+// v2: entries now include the Delivered-To header (needed for the account filter).
+const RANGE_CACHE_KEY = "correo_range_meta_cache_v2";
+const OLD_RANGE_CACHE_KEY = "correo_range_meta_cache";
 const RANGE_CACHE_MAX = 4000;
 type RangeMeta = MessageMeta & { id: string; threadId: string };
 
 async function loadRangeCache(): Promise<Record<string, RangeMeta>> {
+  void chrome.storage.local.remove(OLD_RANGE_CACHE_KEY);
   const s = await chrome.storage.local.get(RANGE_CACHE_KEY);
   return (s[RANGE_CACHE_KEY] as Record<string, RangeMeta> | undefined) ?? {};
 }
@@ -943,12 +954,11 @@ async function saveRangeCache(cache: Record<string, RangeMeta>): Promise<void> {
 export async function listMessagesInRange(
   fromStr: string,
   toStr: string,
-  sender = "",
+  counterpart = "",
   opts: RangeOptions = {},
 ): Promise<{ messages: DayMessage[]; truncated: boolean; stats: RangeStats }> {
   const startedAt = Date.now();
   const waitedBefore = rateLimitWaitedMs;
-  const who = sender.trim().replace(/["{}()]/g, "").toLowerCase();
   const [y1, m1, d1] = fromStr.split("-").map(Number);
   const [y2, m2, d2] = toStr.split("-").map(Number);
   const startSec = Math.floor(new Date(y1, m1 - 1, d1).getTime() / 1000);
@@ -960,10 +970,8 @@ export async function listMessagesInRange(
   let pageToken: string | undefined;
   do {
     const params = new URLSearchParams({
-      // With a sender: `from:` for normal mail plus a bare-text term, since mail
-      // reflected by a group has the group in From (real author in a header).
-      // The exact check happens below on the real sender.
-      q: `after:${startSec} before:${endSec} -in:draft${who ? ` {from:(${who}) "${who}"}` : ""}`,
+      // The exact checks happen below on the real headers.
+      q: buildRangeQuery(startSec, endSec, counterpart, opts.account ?? ""),
       maxResults: "500",
     });
     if (pageToken) params.set("pageToken", pageToken);
@@ -1013,6 +1021,9 @@ export async function listMessagesInRange(
     const to = extractAddresses(headerValue(msg, "To") || "");
     const cc = extractAddresses(headerValue(msg, "Cc") || "");
     const isMine = from.some((a) => myAddrs.has(a.addr));
+    const delivered = headerValues(msg, "Delivered-To");
+    if (!matchesAccount(opts.account ?? "", isMine, from, to, cc, delivered)) continue;
+    if (!matchesCounterpart(counterpart, isMine, from, to, cc, myAddrs)) continue;
     const peers = isMine
       ? [...to, ...(to.length === 0 ? cc : [])].filter((a) => !myAddrs.has(a.addr))
       : from;
@@ -1030,13 +1041,8 @@ export async function listMessagesInRange(
       ccAddrs: cc,
     });
   }
-  const kept = who
-    ? messages.filter(
-        (m) =>
-          m.direction === "received" &&
-          m.peers.some((p) => p.addr.includes(who) || (p.name ?? "").toLowerCase().includes(who)),
-      )
-    : messages;
+  // Account / counterpart filters were applied per message above.
+  const kept = messages;
   kept.sort((a, b) => b.timeMs - a.timeMs);
   return {
     messages: kept,
