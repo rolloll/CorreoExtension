@@ -123,3 +123,40 @@ export function registerUpdateNotificationClick(): void {
     });
   });
 }
+
+// ---- One-click update through the local helper (installed by install.ps1) ----
+// Chrome only lets an extension talk to a program the user registered for it
+// (native messaging). The helper can do exactly one thing: fetch the latest
+// release of this repo and mirror it into this extension's own folder.
+const HELPER_NAME = "com.correo.updater";
+
+export interface HelperResult {
+  ok: boolean;
+  version?: string;
+  error?: string;
+}
+
+function callHelper(message: { type: "ping" | "update" }): Promise<HelperResult & { installedVersion?: string }> {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendNativeMessage(HELPER_NAME, message, (response: HelperResult | undefined) => {
+        const err = chrome.runtime.lastError; // must be read, or Chrome logs it
+        if (err) resolve({ ok: false, error: err.message });
+        else resolve(response ?? { ok: false, error: "도우미가 응답하지 않았습니다." });
+      });
+    } catch (e) {
+      resolve({ ok: false, error: String(e) });
+    }
+  });
+}
+
+// True when the helper is registered for this browser profile.
+export async function helperAvailable(): Promise<boolean> {
+  return (await callHelper({ type: "ping" })).ok;
+}
+
+// Downloads the latest release into the install folder. On success the caller
+// should chrome.runtime.reload() so the new files take effect.
+export function updateViaHelper(): Promise<HelperResult> {
+  return callHelper({ type: "update" });
+}
