@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { loadAddressInfo, setUpCcOnlySeparation, type AddressInfo } from "./gmail/api";
 import { isValidAddress, loadAliasConfig, normalizeAddress, saveAliasConfig, type AliasConfig } from "./aliases";
 import AiSettings from "./AiSettings";
+import BackupSettings from "./BackupSettings";
 import TelegramSettings from "./TelegramSettings";
 import { checkForUpdate, loadUpdateInfo, type UpdateInfo } from "./updateCheck";
 import TrackerGuide from "./TrackerGuide";
@@ -371,6 +372,7 @@ export default function Settings({
 
       <TelegramSettings />
       <AiSettings />
+      <BackupSettings />
 
       <button className="btn btn-secondary st-eml-btn" onClick={openEmlViewer}>
         .eml 파일 뷰어 열기 (새 탭)

@@ -29,3 +29,7 @@ keys/
 # Secrets
 tracker/.api-token
 .env*
+
+# Local-only Cloudflare config and state
+tracker/wrangler.local.toml
+tracker/.wrangler/

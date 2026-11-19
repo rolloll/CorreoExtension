@@ -1,0 +1,15 @@
+{
+  "name": "correo-tracker",
+  "private": true,
+  "description": "Read-tracking server for the Correo Chrome extension (Cloudflare Worker + KV).",
+  "cloudflare": {
+    "bindings": {
+      "API_TOKEN": {
+        "description": "Correo 앱의 설정 → 열람 추적 안내 2단계에 표시된 **토큰**을 붙여넣으세요."
+      },
+      "OPENS": {
+        "description": "열람 기록 저장소입니다. 자동으로 만들어지니 그대로 두세요."
+      }
+    }
+  }
+}

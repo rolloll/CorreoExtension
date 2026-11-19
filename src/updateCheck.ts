@@ -5,7 +5,7 @@
 //
 // The repo must be public: the unauthenticated GitHub API can't see releases
 // of a private repo.
-const GITHUB_REPO = "rolloll/CorreoExtension";
+export const GITHUB_REPO = "rolloll/CorreoExtension";
 
 // One line for PowerShell: downloads the latest release straight into
 // C:\Program Files (x86)\Correo (asks for admin itself), so no zip lands in
