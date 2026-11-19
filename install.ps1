@@ -164,9 +164,14 @@ catch {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
     # Let the current user update this folder later without admin rights, so the
-    # one-click updater works. (Only needed under Program Files.)
-    if ($Dir.StartsWith(${env:ProgramFiles(x86)}, [StringComparison]::OrdinalIgnoreCase) -or $Dir.StartsWith($env:ProgramFiles, [StringComparison]::OrdinalIgnoreCase)) {
-      icacls "$Dir" /grant "${env:USERDOMAIN}\${env:USERNAME}:(OI)(CI)M" /T /C /Q | Out-Null
+    # one-click updater works. Only possible while elevated (changing permissions
+    # needs more than write access), and only needed the first time: on later
+    # updates the user can already write here and this would just print
+    # "access denied" for every file.
+    $underProgramFiles = $Dir.StartsWith(${env:ProgramFiles(x86)}, [StringComparison]::OrdinalIgnoreCase) -or $Dir.StartsWith($env:ProgramFiles, [StringComparison]::OrdinalIgnoreCase)
+    $isElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($underProgramFiles -and $isElevated) {
+      icacls "$Dir" /grant "${env:USERDOMAIN}\${env:USERNAME}:(OI)(CI)M" /T /C /Q 2>&1 | Out-Null
     }
 
     # Install the update helper and register it for Chrome (per-user, no admin).
