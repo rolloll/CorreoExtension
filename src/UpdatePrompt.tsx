@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  INSTALL_COMMAND,
+  installCommand,
   UPDATE_INFO_KEY,
   dismissUpdate,
   helperAvailable,
@@ -88,7 +88,7 @@ export default function UpdatePrompt() {
           className="btn btn-primary"
           title="PowerShell에 붙여넣어 실행하면 C:\Program Files (x86)\Correo에 새 버전이 설치됩니다"
           onClick={() => {
-            void navigator.clipboard.writeText(INSTALL_COMMAND).then(() => setCopied(true));
+            void navigator.clipboard.writeText(installCommand(info.latestVersion)).then(() => setCopied(true));
           }}
         >
           {copied ? "복사됨" : "업데이트 명령 복사"}

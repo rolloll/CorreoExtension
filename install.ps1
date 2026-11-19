@@ -8,8 +8,11 @@
 #                (chrome://extensions -> Developer mode -> Load unpacked).
 #   Updating   : use the "update now" button in Correo (or run this again, then
 #                press Correo's reload button in chrome://extensions).
-# Optional overrides (environment variables, mostly for testing):
-#   CORREO_DIR, CORREO_REPO, CORREO_HOST_DIR, CORREO_HOST_NAME, CORREO_NO_REGISTRY
+# Overrides exist only for testing and have deliberately unusual names, so a
+# variable left behind in a terminal can never redirect a real install (an
+# earlier name once sent an update to the Downloads folder):
+#   CORREO_TEST_DIR, CORREO_TEST_HOST_DIR, CORREO_TEST_HOST_NAME,
+#   CORREO_TEST_NO_REGISTRY, CORREO_REPO
 #
 # Keep this file ASCII-only and BOM-free. GitHub serves release assets as
 # application/octet-stream, which Windows PowerShell 5.1's irm decodes as
@@ -22,10 +25,10 @@
   $ProgressPreference = "SilentlyContinue"
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-  $Dir = if ($env:CORREO_DIR) { $env:CORREO_DIR } else { Join-Path ${env:ProgramFiles(x86)} "Correo" }
+  $Dir = if ($env:CORREO_TEST_DIR) { $env:CORREO_TEST_DIR } else { Join-Path ${env:ProgramFiles(x86)} "Correo" }
   $Repo = if ($env:CORREO_REPO) { $env:CORREO_REPO } else { "rolloll/CorreoExtension" }
-  $HostDir = if ($env:CORREO_HOST_DIR) { $env:CORREO_HOST_DIR } else { Join-Path $env:LOCALAPPDATA "Correo\host" }
-  $HostName = if ($env:CORREO_HOST_NAME) { $env:CORREO_HOST_NAME } else { "com.correo.updater" }
+  $HostDir = if ($env:CORREO_TEST_HOST_DIR) { $env:CORREO_TEST_HOST_DIR } else { Join-Path $env:LOCALAPPDATA "Correo\host" }
+  $HostName = if ($env:CORREO_TEST_HOST_NAME) { $env:CORREO_TEST_HOST_NAME } else { "com.correo.updater" }
   # The extension id is fixed by the "key" in manifest.json.
   $ExtensionId = "lgccffbckaimbimcahkompkggmafodcc"
 
@@ -137,6 +140,8 @@ catch {
   }
 
   try {
+    Write-Host "Install folder: $Dir"
+    if ($env:CORREO_TEST_DIR) { Write-Host "(test override in effect)" -ForegroundColor Yellow }
     Write-Host "Checking the latest release..."
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers @{ "User-Agent" = "correo-installer" }
     $asset = $release.assets | Where-Object { $_.name -like "Correo-v*.zip" } | Select-Object -First 1
@@ -179,7 +184,7 @@ catch {
       type = "stdio"
       allowed_origins = @("chrome-extension://$ExtensionId/")
     } | ConvertTo-Json)
-    if (-not $env:CORREO_NO_REGISTRY) {
+    if (-not $env:CORREO_TEST_NO_REGISTRY) {
       $key = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$HostName"
       New-Item -Path $key -Force | Out-Null
       Set-ItemProperty -Path $key -Name "(default)" -Value $hostJson
