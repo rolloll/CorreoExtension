@@ -8,6 +8,7 @@ import Labels from "./Labels";
 import Contacts from "./Contacts";
 import Settings from "./Settings";
 import DayView from "./DayView";
+import UpdatePrompt from "./UpdatePrompt";
 import { IconHome, IconCalendar, IconLabel, IconContacts, IconSettings, IconRefresh, IconX } from "./icons";
 import "./Shell.css";
 
@@ -216,6 +217,7 @@ export default function Shell({
       </nav>
 
       <div className="cr-content">
+        <UpdatePrompt />
         <div className="cr-view">
           {view === "home" && (
             <Home

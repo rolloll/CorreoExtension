@@ -7,7 +7,8 @@
 // of a private repo.
 const GITHUB_REPO = "rolloll/CorreoExtension";
 
-const UPDATE_INFO_KEY = "correo_update_info";
+export const UPDATE_INFO_KEY = "correo_update_info";
+const DISMISSED_KEY = "correo_update_dismissed";
 const NOTIFICATION_ID = "correo-update";
 
 export interface UpdateInfo {
@@ -50,6 +51,17 @@ export function isNewerVersion(latest: string, current: string): boolean {
 export async function loadUpdateInfo(): Promise<UpdateInfo | null> {
   const stored = await chrome.storage.local.get(UPDATE_INFO_KEY);
   return (stored[UPDATE_INFO_KEY] as UpdateInfo | undefined) ?? null;
+}
+
+// "나중에" on the in-app prompt hides it for that version only; a newer
+// release prompts again.
+export async function loadDismissedVersion(): Promise<string | null> {
+  const stored = await chrome.storage.local.get(DISMISSED_KEY);
+  return (stored[DISMISSED_KEY] as string | undefined) ?? null;
+}
+
+export async function dismissUpdate(version: string): Promise<void> {
+  await chrome.storage.local.set({ [DISMISSED_KEY]: version });
 }
 
 async function notifyUpdate(info: UpdateInfo): Promise<void> {

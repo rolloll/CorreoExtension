@@ -249,8 +249,8 @@ export default function Labels({
       } else {
         const query = `${ruleWho}:${addr}`;
         if (ruleFuture) {
-          await createFilter(query, label.id, ruleArchive);
-          parts.push("필터를 만들었습니다");
+          const result = await createFilter(query, label.id, ruleArchive);
+          parts.push(result === "exists" ? "같은 필터가 이미 있어 그대로 사용합니다" : "필터를 만들었습니다");
         }
         if (ruleExisting) {
           const n = await applyLabelToExisting(query, label.id, ruleArchive);

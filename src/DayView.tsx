@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
-import { listMessagesInRange, type DayMessage } from "./gmail/api";
+import { listMessagesInRange, type DayMessage, type RangeStats } from "./gmail/api";
 import { loadTrackerConfig, loadTracked, fetchHits, findTracked, realHits } from "./tracking";
+import { downloadExport, type ExportFormat } from "./exportMessages";
+import KeywordChips from "./KeywordChips";
+import { DEFAULT_GROUPS, OTHER_GROUP, groupOf, loadGroups, saveGroups, type MailGroup } from "./groups";
 import "./DayView.css";
 
 type DirFilter = "all" | "received" | "sent";
@@ -35,10 +38,20 @@ export default function DayView() {
   const [messages, setMessages] = useState<DayMessage[] | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("csv");
+  const [groups, setGroups] = useState<MailGroup[]>(DEFAULT_GROUPS);
+  const [groupFilter, setGroupFilter] = useState("all");
+  const [editingGroups, setEditingGroups] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [stats, setStats] = useState<RangeStats | null>(null);
   // messageId -> null (tracked, no read yet) | first-read time; absent = not tracked
   const [reads, setReads] = useState<Record<string, number | null>>({});
 
   const valid = !!from && !!to && from <= to;
+
+  useEffect(() => {
+    loadGroups().then(setGroups).catch(() => {});
+  }, []);
 
   // Debounce typing so each keystroke doesn't trigger a Gmail search.
   useEffect(() => {
@@ -51,11 +64,17 @@ export default function DayView() {
     let cancelled = false;
     setMessages(null);
     setError(null);
-    listMessagesInRange(from, to, sender)
+    setProgress(null);
+    setStats(null);
+    listMessagesInRange(from, to, sender, {
+      isCancelled: () => cancelled,
+      onProgress: (done, total) => !cancelled && setProgress({ done, total }),
+    })
       .then((r) => {
         if (cancelled) return;
         setMessages(r.messages);
         setTruncated(r.truncated);
+        setStats(r.stats);
         void loadReads(r.messages, () => cancelled);
       })
       .catch((e) => !cancelled && setError(String(e)));
@@ -108,8 +127,18 @@ export default function DayView() {
 
   const received = messages?.filter((m) => m.direction === "received").length ?? 0;
   const sent = messages?.filter((m) => m.direction === "sent").length ?? 0;
-  const shown = messages?.filter((m) => filter === "all" || m.direction === filter) ?? [];
+  const byDir = messages?.filter((m) => filter === "all" || m.direction === filter) ?? [];
+  const groupNames = [...groups.map((g) => g.name), OTHER_GROUP];
+  const groupCount = (name: string) => byDir.filter((m) => groupOf(m, groups) === name).length;
+  // A removed group can leave a stale selection behind; fall back to showing all.
+  const activeGroup = groupNames.includes(groupFilter) ? groupFilter : "all";
+  const shown = activeGroup === "all" ? byDir : byDir.filter((m) => groupOf(m, groups) === activeGroup);
   const isRange = from !== to;
+
+  function updateGroups(next: MailGroup[]) {
+    setGroups(next);
+    void saveGroups(next);
+  }
 
   const tabs: { key: DirFilter; label: string; n: number }[] = [
     { key: "all", label: "전체", n: received + sent },
@@ -170,10 +199,99 @@ export default function DayView() {
         ))}
       </div>
 
+      <div className="dv-groups">
+        {["all", ...groupNames].map((name) => (
+          <button
+            key={name}
+            type="button"
+            className={`dv-group ${activeGroup === name ? "active" : ""}`}
+            onClick={() => setGroupFilter(name)}
+          >
+            {name === "all" ? "모두" : name}
+            {messages && <span className="dv-tab-n">{name === "all" ? byDir.length : groupCount(name)}</span>}
+          </button>
+        ))}
+        <button type="button" className="dv-preset dv-group-edit" onClick={() => setEditingGroups((v) => !v)}>
+          {editingGroups ? "닫기" : "그룹 설정"}
+        </button>
+      </div>
+      {editingGroups && (
+        <div className="dv-group-editor">
+          <div className="text-muted dv-group-help">
+            제목 또는 보낸/받는 사람의 이름·주소에 키워드가 들어 있으면 해당 그룹으로 분류합니다 (위에서부터 먼저 맞는 그룹).
+            Gmail 라벨은 바뀌지 않습니다.
+          </div>
+          {groups.map((g, i) => (
+            <div key={`${i}-${g.name}`} className="dv-group-card">
+              <div className="dv-group-row">
+                <input
+                  className="dv-date dv-group-name"
+                  defaultValue={g.name}
+                  aria-label="그룹 이름"
+                  onBlur={(e) => {
+                    const name = e.target.value.trim();
+                    if (name && name !== g.name) updateGroups(groups.map((x, j) => (j === i ? { ...x, name } : x)));
+                  }}
+                />
+                <button type="button" className="dv-preset" onClick={() => updateGroups(groups.filter((_, j) => j !== i))}>
+                  그룹 삭제
+                </button>
+              </div>
+              <KeywordChips
+                keywords={g.keywords}
+                onChange={(keywords) => updateGroups(groups.map((x, j) => (j === i ? { ...x, keywords } : x)))}
+              />
+            </div>
+          ))}
+          <div className="dv-group-row">
+            <button
+              type="button"
+              className="dv-preset"
+              onClick={() => updateGroups([...groups, { name: `그룹 ${groups.length + 1}`, keywords: [] }])}
+            >
+              + 그룹 추가
+            </button>
+            <button type="button" className="dv-preset" onClick={() => updateGroups(DEFAULT_GROUPS)}>
+              기본값으로
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="dv-export">
+        <select
+          className="dv-date dv-export-fmt"
+          value={exportFormat}
+          onChange={(e) => setExportFormat(e.target.value as ExportFormat)}
+          aria-label="파일 형식"
+        >
+          <option value="csv">CSV (엑셀)</option>
+          <option value="txt">텍스트 (.txt)</option>
+        </select>
+        <button
+          type="button"
+          className="dv-preset"
+          disabled={!messages || shown.length === 0}
+          onClick={() => downloadExport(shown, exportFormat, from, to, (m) => groupOf(m, groups))}
+        >
+          추출 ({shown.length}건)
+        </button>
+      </div>
+
       <div className="dv-list">
         {error && <p className="dv-error">{error}</p>}
         {!valid && <div className="dv-empty text-muted">날짜를 선택하세요.</div>}
-        {valid && !error && !messages && <div className="dv-empty text-muted">불러오는 중…</div>}
+        {valid && !error && !messages && (
+          <div className="dv-empty text-muted">
+            불러오는 중…{progress ? ` ${progress.done}/${progress.total}` : ""}
+          </div>
+        )}
+        {stats && (
+          <div className="dv-note">
+            {stats.total}통 · {(stats.elapsedMs / 1000).toFixed(1)}초
+            {stats.total > stats.fetched ? ` · ${stats.total - stats.fetched}통은 저장본 사용` : ""}
+            {stats.rateLimitWaitMs > 0 ? ` · Gmail 호출 제한 대기 ${(stats.rateLimitWaitMs / 1000).toFixed(0)}초` : ""}
+          </div>
+        )}
         {messages && shown.length === 0 && <div className="dv-empty text-muted">해당 기간의 메일이 없습니다.</div>}
         {truncated && <div className="dv-note">메일이 많아 최근 1,000통까지만 표시합니다. 기간을 좁혀 보세요.</div>}
         {shown.map((m) => {
@@ -198,6 +316,7 @@ export default function DayView() {
                     </span>
                   </div>
                   <div className="dv-item-subject">
+                    <span className="dv-group-tag">{groupOf(m, groups)}</span>
                     {m.subject}
                     {m.messageId in reads && (
                       <span className={`dv-read ${reads[m.messageId] ? "on" : ""}`}>

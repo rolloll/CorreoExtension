@@ -38,6 +38,10 @@ function sleep(ms: number): Promise<void> {
 // Gmail's per-user quota is ~6000 units/min; hitting it returns 429, or 403
 // with reason rateLimitExceeded. Those clear on their own, so back off and
 // retry instead of failing the whole operation.
+// Total time spent sleeping on rate-limit retries in this page; lets a caller
+// (the date-range view) report how much of a slow load was quota back-off.
+let rateLimitWaitedMs = 0;
+
 async function gmailFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const token = await getAuthToken(false);
   let delay = 3000;
@@ -53,6 +57,7 @@ async function gmailFetch(path: string, init: RequestInit = {}): Promise<Respons
       rateLimited = /rateLimitExceeded|userRateLimitExceeded/.test(body);
     }
     if (!rateLimited) return resp;
+    rateLimitWaitedMs += delay;
     await sleep(delay);
     delay *= 2;
   }
@@ -205,18 +210,67 @@ export async function mergeLabels(sourceLabelId: string, targetLabelId: string):
   return messageIds.length;
 }
 
+interface GmailFilter {
+  id: string;
+  criteria?: { query?: string; from?: string; to?: string };
+  action?: { addLabelIds?: string[]; removeLabelIds?: string[] };
+}
+
+// Filters already on the account whose condition is the same as `query`.
+// Gmail may have stored it as criteria.query ("from:x") or, if made in
+// Gmail's own UI, as criteria.from / criteria.to.
+async function findFiltersWithCondition(query: string): Promise<GmailFilter[]> {
+  const data = await gmailJson<{ filter?: GmailFilter[] }>("/settings/filters", "필터 목록 조회");
+  const m = /^(from|to):(.+)$/i.exec(query.trim());
+  const key = m?.[1].toLowerCase() as "from" | "to" | undefined;
+  const addr = m?.[2].trim().toLowerCase();
+  return (data.filter || []).filter((f) => {
+    const c = f.criteria;
+    if (!c) return false;
+    if ((c.query ?? "").trim().toLowerCase() === query.trim().toLowerCase()) return true;
+    return !!key && !c.query && (c[key] ?? "").trim().toLowerCase() === addr;
+  });
+}
+
+// "created", or "exists" when an identical filter was already there (e.g. a
+// previous attempt made it and a later step failed), so retrying is harmless.
 export async function createFilter(
   query: string,
   labelId: string,
   archive: boolean,
-): Promise<void> {
+): Promise<"created" | "exists"> {
   const action: Record<string, string[]> = { addLabelIds: [labelId] };
   if (archive) action.removeLabelIds = ["INBOX"];
-  await gmailJson("/settings/filters", "필터 생성", {
+  const resp = await gmailFetch("/settings/filters", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ criteria: { query }, action }),
   });
+  if (resp.ok) return "created";
+  const text = await resp.text();
+  if (resp.status === 400 && /already exists/i.test(text)) {
+    const existing = await findFiltersWithCondition(query);
+    const same = existing.find(
+      (f) =>
+        !!f.action?.addLabelIds?.includes(labelId) &&
+        !!f.action?.removeLabelIds?.includes("INBOX") === archive,
+    );
+    if (same) return "exists";
+    if (existing.length > 0) {
+      const names = new Map((await listLabels()).map((l) => [l.id, l.name]));
+      const what = existing
+        .map((f) => {
+          const labels = (f.action?.addLabelIds ?? []).map((id) => names.get(id) ?? id).join(", ") || "라벨 없음";
+          return `${labels}${f.action?.removeLabelIds?.includes("INBOX") ? " + 받은편지함에서 보관처리" : ""}`;
+        })
+        .join(" / ");
+      throw new Error(
+        `같은 조건(${query})의 필터가 이미 있고 다른 동작을 합니다 (${what}). ` +
+          "Gmail 설정 → 필터 및 차단된 주소에서 기존 필터를 삭제하거나 수정한 뒤 다시 시도해 주세요.",
+      );
+    }
+  }
+  throw new Error(`필터 생성 실패 (${resp.status}): ${text}`);
 }
 
 async function searchMessageIds(query: string): Promise<string[]> {
@@ -840,9 +894,48 @@ export interface DayMessage {
   // Received mail where my address is directly in To (not just Cc / a list).
   toMe: boolean;
   timeMs: number;
+  // Full header addresses, used by the export (peers is only the "other side").
+  fromAddrs: { addr: string; name: string | null }[];
+  toAddrs: { addr: string; name: string | null }[];
+  ccAddrs: { addr: string; name: string | null }[];
 }
 
 const RANGE_MESSAGE_CAP = 1000;
+
+export interface RangeStats {
+  total: number;
+  fetched: number; // metadata calls actually made
+  elapsedMs: number;
+  // Summed per-request back-off sleeps; requests run in parallel, so this can
+  // exceed elapsedMs. A large value means Gmail's quota was the bottleneck.
+  rateLimitWaitMs: number;
+}
+
+export interface RangeOptions {
+  isCancelled?: () => boolean;
+  onProgress?: (done: number, total: number) => void;
+}
+
+// Message headers never change, so they're kept between visits: re-opening a
+// range (or widening it) only fetches the messages not seen before.
+const RANGE_CACHE_KEY = "correo_range_meta_cache";
+const RANGE_CACHE_MAX = 4000;
+type RangeMeta = MessageMeta & { id: string; threadId: string };
+
+async function loadRangeCache(): Promise<Record<string, RangeMeta>> {
+  const s = await chrome.storage.local.get(RANGE_CACHE_KEY);
+  return (s[RANGE_CACHE_KEY] as Record<string, RangeMeta> | undefined) ?? {};
+}
+
+async function saveRangeCache(cache: Record<string, RangeMeta>): Promise<void> {
+  let entries = Object.entries(cache);
+  if (entries.length > RANGE_CACHE_MAX) {
+    // Keep the newest messages.
+    entries.sort((a, b) => parseInt(b[1].internalDate ?? "0", 10) - parseInt(a[1].internalDate ?? "0", 10));
+    entries = entries.slice(0, RANGE_CACHE_MAX);
+  }
+  await chrome.storage.local.set({ [RANGE_CACHE_KEY]: Object.fromEntries(entries) });
+}
 
 // Every message sent or received between two local calendar days, inclusive
 // ("YYYY-MM-DD"). Gmail's date-string operators (after:/before:) are read in
@@ -851,7 +944,10 @@ export async function listMessagesInRange(
   fromStr: string,
   toStr: string,
   sender = "",
-): Promise<{ messages: DayMessage[]; truncated: boolean }> {
+  opts: RangeOptions = {},
+): Promise<{ messages: DayMessage[]; truncated: boolean; stats: RangeStats }> {
+  const startedAt = Date.now();
+  const waitedBefore = rateLimitWaitedMs;
   const who = sender.trim().replace(/["{}()]/g, "").toLowerCase();
   const [y1, m1, d1] = fromStr.split("-").map(Number);
   const [y2, m2, d2] = toStr.split("-").map(Number);
@@ -881,18 +977,33 @@ export async function listMessagesInRange(
   const truncated = ids.length >= RANGE_MESSAGE_CAP && !!pageToken;
   ids = ids.slice(0, RANGE_MESSAGE_CAP);
 
+  const cache = await loadRangeCache();
+  let fetched = 0;
+  let done = 0;
   const metas = await mapWithConcurrency(ids, 8, async (id) => {
+    // A newer query superseded this one: stop spending quota on it.
+    if (opts.isCancelled?.()) return null;
+    if (cache[id]) {
+      opts.onProgress?.(++done, ids.length);
+      return cache[id];
+    }
     const params = new URLSearchParams({ format: "metadata" });
     for (const h of SENDER_HEADERS) params.append("metadataHeaders", h);
     try {
-      return await gmailJson<MessageMeta & { id: string; threadId: string }>(
-        `/messages/${id}?${params.toString()}`,
-        "메일 조회",
-      );
+      const m = await gmailJson<RangeMeta>(`/messages/${id}?${params.toString()}`, "메일 조회");
+      fetched++;
+      cache[id] = m;
+      return m;
     } catch {
       return null;
+    } finally {
+      opts.onProgress?.(++done, ids.length);
     }
   });
+  if (!opts.isCancelled?.() && fetched > 0) {
+    // Only persist what this range (or earlier ones) fetched; failures stay out.
+    void saveRangeCache(cache).catch(() => {});
+  }
 
   const messages: DayMessage[] = [];
   for (const msg of metas) {
@@ -914,6 +1025,9 @@ export async function listMessagesInRange(
       cc: !isMine && !to.some((a) => myAddrs.has(a.addr)) && cc.some((a) => myAddrs.has(a.addr)),
       toMe: !isMine && to.some((a) => myAddrs.has(a.addr)),
       timeMs,
+      fromAddrs: from,
+      toAddrs: to,
+      ccAddrs: cc,
     });
   }
   const kept = who
@@ -924,7 +1038,16 @@ export async function listMessagesInRange(
       )
     : messages;
   kept.sort((a, b) => b.timeMs - a.timeMs);
-  return { messages: kept, truncated };
+  return {
+    messages: kept,
+    truncated,
+    stats: {
+      total: ids.length,
+      fetched,
+      elapsedMs: Date.now() - startedAt,
+      rateLimitWaitMs: rateLimitWaitedMs - waitedBefore,
+    },
+  };
 }
 
 // ---- Sent-message lookup for read tracking ----
