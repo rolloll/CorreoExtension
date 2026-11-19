@@ -33,5 +33,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" "Correo-${GITHUB_REF_NAME}.zip" \
+          gh release create "${GITHUB_REF_NAME}" "Correo-${GITHUB_REF_NAME}.zip" install.ps1 \
             --title "Correo ${GITHUB_REF_NAME}" --generate-notes

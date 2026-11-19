@@ -22,6 +22,9 @@
 .dv-tab-n { margin-left: 2px; font-variant-numeric: tabular-nums; }
 .dv-export { display: flex; align-items: center; gap: 6px; padding: 8px 14px; flex: none; border-bottom: 1px solid var(--color-neutral-300, #c8ced6); }
 .dv-export-fmt { flex: none; width: auto; }
+.dv-export-ai { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--color-neutral-700); cursor: pointer; }
+.dv-export-status { display: flex; align-items: center; gap: 8px; padding: 6px 14px; font-size: 12px; flex: none; border-bottom: 1px solid var(--color-neutral-300, #c8ced6); }
+.dv-error-inline { color: #b3261e; word-break: break-all; }
 .dv-preset:disabled { opacity: 0.5; cursor: default; border-color: var(--color-neutral-300, #c8ced6); color: var(--color-neutral-700); }
 .dv-groups { display: flex; gap: 6px; padding: 8px 14px; flex: none; flex-wrap: wrap; align-items: center; }
 .dv-group {

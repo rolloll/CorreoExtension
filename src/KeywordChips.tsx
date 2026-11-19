@@ -5,9 +5,13 @@ import { useRef, useState } from "react";
 export default function KeywordChips({
   keywords,
   onChange,
+  placeholder = "키워드 추가 후 Enter",
+  normalize = (s) => s,
 }: {
   keywords: string[];
   onChange: (next: string[]) => void;
+  placeholder?: string;
+  normalize?: (s: string) => string;
 }) {
   const [editIdx, setEditIdx] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
@@ -19,7 +23,7 @@ export default function KeywordChips({
   function clean(list: string[]): string[] {
     const seen = new Set<string>();
     return list
-      .map((k) => k.trim())
+      .map((k) => normalize(k.trim()))
       .filter((k) => {
         const key = k.toLowerCase();
         if (!k || seen.has(key)) return false;
@@ -94,7 +98,7 @@ export default function KeywordChips({
       <input
         className="kw-add"
         value={newText}
-        placeholder="키워드 추가 후 Enter"
+        placeholder={placeholder}
         onChange={(e) => setNewText(e.target.value)}
         onBlur={addNew}
         onKeyDown={(e) => {

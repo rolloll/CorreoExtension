@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { loadAddressInfo, setUpCcOnlySeparation, type AddressInfo } from "./gmail/api";
 import { isValidAddress, loadAliasConfig, normalizeAddress, saveAliasConfig, type AliasConfig } from "./aliases";
+import AiSettings from "./AiSettings";
+import TelegramSettings from "./TelegramSettings";
 import { checkForUpdate, loadUpdateInfo, type UpdateInfo } from "./updateCheck";
 import { loadTrackerConfig, saveTrackerConfig, type TrackerConfig } from "./tracking";
 import type { GmailAccount } from "./App";
@@ -352,6 +354,9 @@ export default function Settings({
         </button>
         {trackerTest && <span className="text-muted" style={{ marginLeft: 8, fontSize: 12 }}>{trackerTest}</span>}
       </div>
+
+      <TelegramSettings />
+      <AiSettings />
 
       <button className="btn btn-secondary st-eml-btn" onClick={openEmlViewer}>
         .eml 파일 뷰어 열기 (새 탭)

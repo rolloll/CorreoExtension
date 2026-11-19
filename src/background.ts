@@ -1,6 +1,7 @@
 import { findSentThreadIds, markThreadResolved, addLabelToThread, listLabels, getUnreadCount, syncActivity, loadActivityCache } from "./gmail/api";
 import { addThreadAsTask } from "./gmail/tasks";
 import { checkForUpdate, registerUpdateNotificationClick } from "./updateCheck";
+import { checkTelegram } from "./telegram";
 
 const UNREAD_BADGE_ALARM = "correo-unread-badge";
 const UPDATE_CHECK_ALARM = "correo-update-check";
@@ -22,7 +23,10 @@ chrome.alarms.create(UNREAD_BADGE_ALARM, { periodInMinutes: 1 });
 // newer GitHub release", not something that needs near-real-time polling.
 chrome.alarms.create(UPDATE_CHECK_ALARM, { periodInMinutes: 720 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === UNREAD_BADGE_ALARM) void refreshUnreadBadge();
+  if (alarm.name === UNREAD_BADGE_ALARM) {
+    void refreshUnreadBadge();
+    void checkTelegram();
+  }
   if (alarm.name === UPDATE_CHECK_ALARM) void checkForUpdate();
 });
 void refreshUnreadBadge();

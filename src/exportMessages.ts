@@ -1,6 +1,13 @@
 import type { DayMessage } from "./gmail/api";
 
 export type ExportFormat = "csv" | "txt";
+export type GroupLabeler = (m: DayMessage) => string;
+
+export interface ExportOptions {
+  groupOf?: GroupLabeler;
+  // messageId -> 1-3 line summary; adds a 요약 column / line when given.
+  summaries?: Record<string, string>;
+}
 
 type Addr = { addr: string; name: string | null };
 
@@ -26,21 +33,34 @@ function chronological(messages: DayMessage[]): DayMessage[] {
   return [...messages].sort((a, b) => a.timeMs - b.timeMs);
 }
 
-export type GroupLabeler = (m: DayMessage) => string;
-
-export function buildExport(messages: DayMessage[], format: ExportFormat, groupOf?: GroupLabeler): string {
+export function buildExport(messages: DayMessage[], format: ExportFormat, opts: ExportOptions = {}): string {
+  const { groupOf, summaries } = opts;
   const rows = chronological(messages);
   if (format === "csv") {
-    const header = ["일시", "구분", ...(groupOf ? ["그룹"] : []), "제목", "보낸 사람", "받는 사람", "참조"];
-    const lines = [header, ...rows.map((m) => [
-      fmtTime(m.timeMs),
-      m.direction === "sent" ? "보냄" : "받음",
-      ...(groupOf ? [groupOf(m)] : []),
-      m.subject,
-      fmtAddrs(m.fromAddrs),
-      fmtAddrs(m.toAddrs),
-      fmtAddrs(m.ccAddrs),
-    ])].map((r) => r.map(csvCell).join(","));
+    const header = [
+      "일시",
+      "구분",
+      ...(groupOf ? ["그룹"] : []),
+      "제목",
+      ...(summaries ? ["요약"] : []),
+      "보낸 사람",
+      "받는 사람",
+      "참조",
+    ];
+    const lines = [
+      header,
+      ...rows.map((m) => [
+        fmtTime(m.timeMs),
+        m.direction === "sent" ? "보냄" : "받음",
+        ...(groupOf ? [groupOf(m)] : []),
+        m.subject,
+        // One line per cell keeps the CSV easy to filter and sort.
+        ...(summaries ? [(summaries[m.messageId] ?? "").replace(/\n/g, " / ")] : []),
+        fmtAddrs(m.fromAddrs),
+        fmtAddrs(m.toAddrs),
+        fmtAddrs(m.ccAddrs),
+      ]),
+    ].map((r) => r.map(csvCell).join(","));
     // BOM so Excel opens the UTF-8 file with Korean text intact.
     return String.fromCharCode(0xfeff) + lines.join("\r\n") + "\r\n";
   }
@@ -50,9 +70,10 @@ export function buildExport(messages: DayMessage[], format: ExportFormat, groupO
         const out = [
           `[${fmtTime(m.timeMs)}] ${m.direction === "sent" ? "보냄" : "받음"}${groupOf ? ` [${groupOf(m)}]` : ""}`,
           `제목: ${m.subject}`,
-          `보낸 사람: ${fmtAddrs(m.fromAddrs)}`,
-          `받는 사람: ${fmtAddrs(m.toAddrs)}`,
         ];
+        const summary = summaries?.[m.messageId];
+        if (summary) out.push(...summary.split("\n").map((l, i) => (i === 0 ? `요약: ${l}` : `      ${l}`)));
+        out.push(`보낸 사람: ${fmtAddrs(m.fromAddrs)}`, `받는 사람: ${fmtAddrs(m.toAddrs)}`);
         if (m.ccAddrs.length) out.push(`참조: ${fmtAddrs(m.ccAddrs)}`);
         return out.join("\n");
       })
@@ -65,10 +86,10 @@ export function downloadExport(
   format: ExportFormat,
   from: string,
   to: string,
-  groupOf?: GroupLabeler,
+  opts: ExportOptions = {},
 ): void {
   const mime = format === "csv" ? "text/csv;charset=utf-8" : "text/plain;charset=utf-8";
-  const url = URL.createObjectURL(new Blob([buildExport(messages, format, groupOf)], { type: mime }));
+  const url = URL.createObjectURL(new Blob([buildExport(messages, format, opts)], { type: mime }));
   const name = `correo_${from === to ? from : `${from}_${to}`}.${format}`;
   void chrome.downloads.download({ url, filename: name, saveAs: true }).finally(() => {
     setTimeout(() => URL.revokeObjectURL(url), 60_000);

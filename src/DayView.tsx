@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listMessagesInRange, type DayMessage, type RangeStats } from "./gmail/api";
 import { loadTrackerConfig, loadTracked, fetchHits, findTracked, realHits } from "./tracking";
-import { downloadExport, type ExportFormat } from "./exportMessages";
+import { downloadExport, type ExportFormat, type ExportOptions } from "./exportMessages";
+import { activeProvider, loadAiConfig, providerLabel } from "./aiProviders";
+import { countUncached, summarizeMessages } from "./aiSummary";
 import KeywordChips from "./KeywordChips";
 import { DEFAULT_GROUPS, OTHER_GROUP, groupOf, loadGroups, saveGroups, type MailGroup } from "./groups";
 import "./DayView.css";
@@ -39,6 +41,10 @@ export default function DayView() {
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("csv");
+  const [withSummary, setWithSummary] = useState(false);
+  const [summarizing, setSummarizing] = useState<{ done: number; total: number } | null>(null);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
+  const cancelRef = useRef(false);
   const [groups, setGroups] = useState<MailGroup[]>(DEFAULT_GROUPS);
   const [groupFilter, setGroupFilter] = useState("all");
   const [editingGroups, setEditingGroups] = useState(false);
@@ -134,6 +140,48 @@ export default function DayView() {
   const activeGroup = groupNames.includes(groupFilter) ? groupFilter : "all";
   const shown = activeGroup === "all" ? byDir : byDir.filter((m) => groupOf(m, groups) === activeGroup);
   const isRange = from !== to;
+
+  async function runExport() {
+    setExportMsg(null);
+    const opts: ExportOptions = { groupOf: (m) => groupOf(m, groups) };
+    if (withSummary) {
+      const cfg = await loadAiConfig();
+      const provider = activeProvider(cfg);
+      if (!provider.apiKey.trim()) {
+        setExportMsg("설정 → AI 요약에서 API 키를 먼저 저장해 주세요.");
+        return;
+      }
+      const fresh = await countUncached(shown, cfg);
+      if (
+        fresh > 0 &&
+        !window.confirm(
+          `${fresh}건을 ${providerLabel(cfg.active)}(${provider.model})로 요약합니다.\n\n` +
+            "· 각 메일의 제목·보낸 사람·본문이 해당 서비스로 전송됩니다.\n" +
+            "· 서비스 이용료가 발생할 수 있습니다 (이미 요약한 메일은 저장본을 씁니다).\n\n계속할까요?",
+        )
+      ) {
+        return;
+      }
+      cancelRef.current = false;
+      setSummarizing({ done: 0, total: shown.length });
+      try {
+        opts.summaries = await summarizeMessages(shown, cfg, {
+          isCancelled: () => cancelRef.current,
+          onProgress: (done, total) => setSummarizing({ done, total }),
+        });
+      } catch (e) {
+        setSummarizing(null);
+        setExportMsg(e instanceof Error ? e.message : String(e));
+        return;
+      }
+      setSummarizing(null);
+      if (cancelRef.current) {
+        setExportMsg("요약을 취소했습니다. 파일은 만들지 않았습니다.");
+        return;
+      }
+    }
+    downloadExport(shown, exportFormat, from, to, opts);
+  }
 
   function updateGroups(next: MailGroup[]) {
     setGroups(next);
@@ -270,12 +318,31 @@ export default function DayView() {
         <button
           type="button"
           className="dv-preset"
-          disabled={!messages || shown.length === 0}
-          onClick={() => downloadExport(shown, exportFormat, from, to, (m) => groupOf(m, groups))}
+          disabled={!messages || shown.length === 0 || !!summarizing}
+          onClick={runExport}
         >
           추출 ({shown.length}건)
         </button>
+        <label className="dv-export-ai" title="설정 → AI 요약에서 저장한 API 키로 각 메일을 1~3줄로 요약해 파일에 넣습니다">
+          <input type="checkbox" checked={withSummary} onChange={(e) => setWithSummary(e.target.checked)} />
+          AI 요약 포함
+        </label>
       </div>
+      {(summarizing || exportMsg) && (
+        <div className="dv-export-status">
+          {summarizing && (
+            <>
+              <span>
+                요약 중… {summarizing.done}/{summarizing.total}
+              </span>
+              <button type="button" className="dv-preset" onClick={() => (cancelRef.current = true)}>
+                취소
+              </button>
+            </>
+          )}
+          {!summarizing && exportMsg && <span className="dv-error-inline">{exportMsg}</span>}
+        </div>
+      )}
 
       <div className="dv-list">
         {error && <p className="dv-error">{error}</p>}

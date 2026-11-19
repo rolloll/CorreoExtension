@@ -96,7 +96,7 @@ function base64UrlEncodeText(text: string): string {
   return base64UrlEncodeBytes(new TextEncoder().encode(text));
 }
 
-async function mapWithConcurrency<T, R>(
+export async function mapWithConcurrency<T, R>(
   items: T[],
   limit: number,
   fn: (item: T) => Promise<R>,
@@ -1090,4 +1090,111 @@ export async function findSentThreadIds(
     }
   }
   return out;
+}
+
+// ---- Message body text (for AI summaries) ----
+
+interface MessagePart {
+  mimeType?: string;
+  filename?: string;
+  body?: { data?: string };
+  parts?: MessagePart[];
+}
+
+function decodeBase64Url(data: string): string {
+  const b64 = data.replace(/-/g, "+").replace(/_/g, "/");
+  const bin = atob(b64);
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+function findPartText(part: MessagePart, mime: string): string | null {
+  if (!part.filename && part.mimeType === mime && part.body?.data) return decodeBase64Url(part.body.data);
+  for (const p of part.parts ?? []) {
+    const hit = findPartText(p, mime);
+    if (hit !== null) return hit;
+  }
+  return null;
+}
+
+function htmlToText(html: string): string {
+  return html
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<br\s*\/?>|<\/(p|div|tr|li|h[1-6])>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+const BODY_TEXT_CAP = 20000;
+
+// Plain-text body of a message (text/plain preferred, else the HTML stripped),
+// without quoted-reply lines and collapsed whitespace. Long bodies are cut at
+// BODY_TEXT_CAP characters.
+export async function getMessageText(messageId: string): Promise<string> {
+  const msg = await gmailJson<{ payload?: MessagePart }>(`/messages/${messageId}?format=full`, "메일 본문 조회");
+  if (!msg.payload) return "";
+  const plain = findPartText(msg.payload, "text/plain");
+  const raw = plain ?? htmlToText(findPartText(msg.payload, "text/html") ?? "");
+  const text = raw
+    .split(/\r?\n/)
+    .filter((l) => !l.trim().startsWith(">"))
+    .join("\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return text.length > BODY_TEXT_CAP ? text.slice(0, BODY_TEXT_CAP) : text;
+}
+
+// ---- New inbox mail addressed to given accounts (for Telegram alerts) ----
+
+export interface IncomingMail {
+  id: string;
+  subject: string;
+  from: string;
+  // The watched address that was found in To/Cc.
+  matched: string;
+  timeMs: number;
+}
+
+// Inbox messages received since `afterSec` whose To (and, if includeCc, Cc)
+// contains one of `addresses`. Gmail's search narrows the candidates; the
+// real headers decide, so a partial match in a display name can't slip in.
+export async function listIncomingToAddresses(
+  addresses: string[],
+  afterSec: number,
+  includeCc: boolean,
+  skipIds: Set<string>,
+): Promise<IncomingMail[]> {
+  const watch = addresses.map((a) => a.trim().toLowerCase()).filter(Boolean);
+  if (watch.length === 0) return [];
+  const terms = watch.flatMap((a) => (includeCc ? [`to:${a}`, `cc:${a}`] : [`to:${a}`]));
+  const params = new URLSearchParams({
+    q: `in:inbox after:${afterSec} {${terms.join(" ")}}`,
+    maxResults: "50",
+  });
+  const list = await gmailJson<{ messages?: { id: string }[] }>(`/messages?${params.toString()}`, "새 메일 조회");
+  const out: IncomingMail[] = [];
+  for (const { id } of list.messages ?? []) {
+    if (skipIds.has(id)) continue;
+    const q = new URLSearchParams({ format: "metadata" });
+    for (const h of ["From", "To", "Cc", "Subject"]) q.append("metadataHeaders", h);
+    const msg = await gmailJson<MessageMeta>(`/messages/${id}?${q.toString()}`, "메일 조회");
+    const to = extractAddresses(headerValue(msg, "To") || "").map((a) => a.addr);
+    const cc = includeCc ? extractAddresses(headerValue(msg, "Cc") || "").map((a) => a.addr) : [];
+    const matched = watch.find((w) => to.includes(w) || cc.includes(w));
+    if (!matched) continue;
+    out.push({
+      id,
+      subject: headerValue(msg, "Subject") || "(제목 없음)",
+      from: headerValue(msg, "From") || "",
+      matched,
+      timeMs: msg.internalDate ? parseInt(msg.internalDate, 10) : 0,
+    });
+  }
+  return out.sort((a, b) => a.timeMs - b.timeMs);
 }
