@@ -42,7 +42,7 @@ export const PROVIDERS: ProviderInfo[] = [
   {
     id: "gemini",
     label: "Gemini",
-    models: ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"],
+    models: ["gemini-3.8-flash"],
     keyHint: "AIza…  (aistudio.google.com)",
   },
   {
@@ -58,12 +58,18 @@ export const DEFAULT_AI_CONFIG: AiConfig = {
   providers: {
     anthropic: { apiKey: "", model: "claude-opus-5-5" },
     openai: { apiKey: "", model: "gpt-4o-mini" },
-    gemini: { apiKey: "", model: "gemini-2.0-flash" },
+    gemini: { apiKey: "", model: "gemini-3.8-flash" },
     custom: { apiKey: "", model: "", baseUrl: "" },
   },
 };
 
 const AI_KEY = "correo_ai_config";
+
+// Names these services have retired (404 "no longer available"); a config that
+// still holds one gets the current default instead of failing every request.
+const RETIRED_MODELS: Partial<Record<ProviderId, string[]>> = {
+  gemini: ["gemini-2.0-flash", "gemini-2.0", "gemini-1.5-flash", "gemini-1.5-pro"],
+};
 
 export async function loadAiConfig(): Promise<AiConfig> {
   const s = await chrome.storage.local.get(AI_KEY);
@@ -73,10 +79,14 @@ export async function loadAiConfig(): Promise<AiConfig> {
     providers: {
       anthropic: { ...DEFAULT_AI_CONFIG.providers.anthropic, ...saved?.providers?.anthropic },
       openai: { ...DEFAULT_AI_CONFIG.providers.openai, ...saved?.providers?.openai },
-      gemini: { ...DEFAULT_AI_CONFIG.providers.gemini, ...saved?.providers?.gemini },
+      gemini: withoutRetiredModel("gemini", { ...DEFAULT_AI_CONFIG.providers.gemini, ...saved?.providers?.gemini }),
       custom: { ...DEFAULT_AI_CONFIG.providers.custom, ...saved?.providers?.custom },
     },
   };
+}
+
+function withoutRetiredModel(id: ProviderId, cfg: ProviderConfig): ProviderConfig {
+  return RETIRED_MODELS[id]?.includes(cfg.model) ? { ...cfg, model: DEFAULT_AI_CONFIG.providers[id].model } : cfg;
 }
 
 export async function saveAiConfig(cfg: AiConfig): Promise<void> {
@@ -113,6 +123,10 @@ export async function ensureCustomHostAccess(baseUrl: string): Promise<boolean> 
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+function isKeyRejected(status: number, body: string): boolean {
+  return status === 401 || status === 403 || (status === 400 && /API[_ ]KEY[_ ]INVALID|api key not valid/i.test(body));
+}
+
 // POST JSON with a few retries on 429 / 5xx (honouring Retry-After).
 async function postJson(url: string, headers: Record<string, string>, body: unknown): Promise<unknown> {
   let delay = 2000;
@@ -124,7 +138,7 @@ async function postJson(url: string, headers: Record<string, string>, body: unkn
     });
     if (resp.ok) return resp.json();
     const text = await resp.text();
-    if (resp.status === 401 || resp.status === 403) throw new LlmAuthError(`키가 거부되었습니다 (${resp.status}): ${text.slice(0, 200)}`);
+    if (isKeyRejected(resp.status, text)) throw new LlmAuthError(`키가 거부되었습니다 (${resp.status}): ${text.slice(0, 200)}`);
     const retryable = resp.status === 429 || resp.status >= 500;
     if (!retryable || attempt >= 3) throw new Error(`요청 실패 (${resp.status}): ${text.slice(0, 300)}`);
     const retryAfter = Number(resp.headers.get("retry-after"));
@@ -200,5 +214,77 @@ export async function callLlm(id: ProviderId, cfg: ProviderConfig, system: strin
     case "custom":
       if (!cfg.baseUrl?.trim()) throw new Error("서비스 주소(Base URL)가 없습니다.");
       return callOpenAiCompatible(cfg.baseUrl, cfg, system, user);
+  }
+}
+
+async function getJson(url: string, headers: Record<string, string>): Promise<unknown> {
+  const resp = await fetch(url, { headers });
+  if (resp.ok) return resp.json();
+  const text = await resp.text();
+  if (isKeyRejected(resp.status, text)) throw new LlmAuthError(`키가 거부되었습니다 (${resp.status}): ${text.slice(0, 200)}`);
+  throw new Error(`요청 실패 (${resp.status}): ${text.slice(0, 300)}`);
+}
+
+// Not text-generation models (the list endpoints return everything).
+const NOT_TEXT_MODEL = /embed|tts|whisper|dall|image|audio|realtime|transcribe|moderation|speech|imagen|veo|aqa|robotics/i;
+
+function newestFirst(ids: string[]): string[] {
+  return [...new Set(ids)].sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+}
+
+// The models this key can actually use right now, asked of the service itself,
+// so the list never goes stale the way a hard-coded one does.
+export async function listModels(id: ProviderId, cfg: ProviderConfig): Promise<string[]> {
+  const key = cfg.apiKey.trim();
+  if (!key) throw new LlmAuthError("API 키가 없습니다.");
+  switch (id) {
+    case "anthropic": {
+      const client = new Anthropic({ apiKey: key, dangerouslyAllowBrowser: true, maxRetries: 2 });
+      const out: string[] = [];
+      try {
+        for await (const m of client.models.list()) out.push(m.id);
+      } catch (e) {
+        if (e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError) {
+          throw new LlmAuthError(`키가 거부되었습니다: ${e.message}`);
+        }
+        throw e;
+      }
+      return newestFirst(out);
+    }
+    case "openai": {
+      const data = (await getJson("https://api.openai.com/v1/models", { Authorization: `Bearer ${key}` })) as { data?: { id: string }[] };
+      return newestFirst((data.data ?? []).map((m) => m.id).filter((i) => !NOT_TEXT_MODEL.test(i)));
+    }
+    case "gemini": {
+      const data = (await getJson("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000", {
+        "x-goog-api-key": key,
+      })) as { models?: { name: string; supportedGenerationMethods?: string[] }[] };
+      return newestFirst(
+        (data.models ?? [])
+          .filter((m) => m.supportedGenerationMethods?.includes("generateContent"))
+          .map((m) => m.name.replace(/^models\//, ""))
+          .filter((i) => !NOT_TEXT_MODEL.test(i)),
+      );
+    }
+    case "custom": {
+      if (!cfg.baseUrl?.trim()) throw new Error("서비스 주소(Base URL)가 없습니다.");
+      const data = (await getJson(`${trimSlash(cfg.baseUrl)}/models`, { Authorization: `Bearer ${key}` })) as { data?: { id: string }[] };
+      return newestFirst((data.data ?? []).map((m) => m.id));
+    }
+  }
+}
+
+// A sensible cheap-and-fast pick from a live list (null = no opinion).
+export function suggestModel(id: ProviderId, models: string[]): string | null {
+  const unstable = /lite|exp|preview|thinking|8b/i;
+  switch (id) {
+    case "gemini":
+      return models.find((m) => /flash/i.test(m) && !unstable.test(m)) ?? models.find((m) => /flash/i.test(m)) ?? models[0] ?? null;
+    case "openai":
+      return models.find((m) => /^gpt/i.test(m) && /mini/i.test(m) && !/preview|\d{4}-\d{2}-\d{2}/.test(m)) ?? null;
+    case "anthropic":
+      return models.find((m) => /haiku/i.test(m)) ?? models[0] ?? null;
+    default:
+      return null;
   }
 }

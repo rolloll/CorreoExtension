@@ -4,8 +4,10 @@ import {
   PROVIDERS,
   callLlm,
   ensureCustomHostAccess,
+  listModels,
   loadAiConfig,
   saveAiConfig,
+  suggestModel,
   type AiConfig,
   type ProviderConfig,
   type ProviderId,
@@ -18,6 +20,10 @@ export default function AiSettings() {
   const [loaded, setLoaded] = useState(false);
   const [testMsg, setTestMsg] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
+  // Models the service itself reports for this key, per service (never stale).
+  const [liveModels, setLiveModels] = useState<Partial<Record<ProviderId, string[]>>>({});
+  const [modelsMsg, setModelsMsg] = useState<string | null>(null);
+  const [loadingModels, setLoadingModels] = useState(false);
 
   useEffect(() => {
     loadAiConfig().then((c) => {
@@ -39,6 +45,36 @@ export default function AiSettings() {
     update({ ...cfg, providers: { ...cfg.providers, [cfg.active]: { ...current, ...patch } } });
   }
 
+  async function loadModels(): Promise<void> {
+    setLoadingModels(true);
+    setModelsMsg("불러오는 중…");
+    try {
+      if (cfg.active === "custom" && !(await ensureCustomHostAccess(current.baseUrl ?? ""))) {
+        setModelsMsg("이 서비스 주소에 접근할 권한이 필요합니다. 허용해 주세요.");
+        return;
+      }
+      const models = await listModels(cfg.active, current);
+      setLiveModels((m) => ({ ...m, [cfg.active]: models }));
+      if (models.length === 0) {
+        setModelsMsg("사용할 수 있는 모델이 없다고 나옵니다. 키의 권한을 확인하세요.");
+      } else if (current.model && !models.includes(current.model)) {
+        const pick = suggestModel(cfg.active, models);
+        if (pick) {
+          updateCurrent({ model: pick });
+          setModelsMsg(`'${current.model}'은 지금 쓸 수 없어 '${pick}'로 바꿨습니다. (모델 ${models.length}개 중 선택 가능)`);
+        } else {
+          setModelsMsg(`'${current.model}'은 지금 쓸 수 없습니다. 모델 ${models.length}개 중에서 입력칸을 눌러 고르세요.`);
+        }
+      } else {
+        setModelsMsg(`모델 ${models.length}개를 불러왔습니다. 입력칸을 눌러 고를 수 있습니다.`);
+      }
+    } catch (e) {
+      setModelsMsg(`실패: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setLoadingModels(false);
+    }
+  }
+
   async function test() {
     setTesting(true);
     setTestMsg("확인 중…");
@@ -50,7 +86,14 @@ export default function AiSettings() {
       const reply = await callLlm(cfg.active, current, "한 단어로만 답하세요.", "OK 라고 답하세요.");
       setTestMsg(reply.trim() ? "연결됐습니다." : "연결은 됐지만 응답이 비어 있습니다. 모델 이름을 확인하세요.");
     } catch (e) {
-      setTestMsg(`실패: ${e instanceof Error ? e.message : e}`);
+      const message = e instanceof Error ? e.message : String(e);
+      if (/\(404\)|not found|no longer available|not supported/i.test(message)) {
+        setTestMsg("이 모델 이름은 지금 쓸 수 없습니다. 쓸 수 있는 모델을 서비스에서 불러옵니다…");
+        await loadModels();
+        setTestMsg("모델을 바꿨다면 '연결 테스트'를 다시 눌러 확인하세요.");
+      } else {
+        setTestMsg(`실패: ${message}`);
+      }
     } finally {
       setTesting(false);
     }
@@ -94,21 +137,32 @@ export default function AiSettings() {
           onChange={(e) => updateCurrent({ baseUrl: e.target.value })}
         />
       )}
-      <input
-        className="input"
-        style={{ width: "100%", marginBottom: 6 }}
-        list="st-ai-models"
-        placeholder="모델 이름"
-        value={current.model}
-        onChange={(e) => updateCurrent({ model: e.target.value })}
-      />
+      <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+        <input
+          className="input"
+          style={{ flex: 1, minWidth: 0 }}
+          list="st-ai-models"
+          placeholder="모델 이름"
+          value={current.model}
+          onChange={(e) => updateCurrent({ model: e.target.value })}
+        />
+        <button className="btn btn-secondary" disabled={!current.apiKey.trim() || loadingModels} onClick={loadModels}>
+          {loadingModels ? "불러오는 중…" : "모델 목록 불러오기"}
+        </button>
+      </div>
       <datalist id="st-ai-models">
-        {info.models.map((m) => (
+        {(liveModels[cfg.active] ?? info.models).map((m) => (
           <option key={m} value={m} />
         ))}
       </datalist>
+      {modelsMsg && (
+        <div className="text-muted" style={{ fontSize: 12, marginBottom: 6 }}>
+          {modelsMsg}
+        </div>
+      )}
       <div className="st-toggle-hint" style={{ marginBottom: 6 }}>
-        모델 이름은 서비스에서 바뀔 수 있어 직접 고칠 수 있습니다. 메일이 많으면 가벼운 모델(예: claude-haiku-5-5, gpt-4o-mini, gemini-2.0-flash)이 저렴합니다.
+        모델 이름은 서비스에서 자주 바뀌고 종료되기도 합니다. <b>모델 목록 불러오기</b>를 누르면 이 키로 지금 쓸 수 있는 모델을 서비스에서 직접
+        받아 오고, 입력칸을 눌러 고를 수 있습니다. 메일이 많으면 가볍고 빠른 모델(이름에 flash, mini, haiku가 들어간 것)이 저렴합니다.
       </div>
       <button className="btn btn-secondary" disabled={!current.apiKey || !current.model || testing} onClick={test}>
         연결 테스트
