@@ -4,7 +4,8 @@ import { isValidAddress, loadAliasConfig, normalizeAddress, saveAliasConfig, typ
 import AiSettings from "./AiSettings";
 import TelegramSettings from "./TelegramSettings";
 import { checkForUpdate, loadUpdateInfo, type UpdateInfo } from "./updateCheck";
-import { loadTrackerConfig, saveTrackerConfig, type TrackerConfig } from "./tracking";
+import TrackerGuide from "./TrackerGuide";
+import { loadTrackerConfig, saveTrackerConfig, testTrackerConnection, type TrackerConfig } from "./tracking";
 import type { GmailAccount } from "./App";
 import "./Settings.css";
 
@@ -97,11 +98,14 @@ export default function Settings({
   const [tracker, setTracker] = useState<TrackerConfig>({ enabled: false, url: "", token: "" });
   const [trackerLoaded, setTrackerLoaded] = useState(false);
   const [trackerTest, setTrackerTest] = useState<string | null>(null);
+  const [trackerGuide, setTrackerGuide] = useState<boolean | null>(null);
 
   useEffect(() => {
     loadTrackerConfig().then((c) => {
       setTracker(c);
       setTrackerLoaded(true);
+      // First time: walk through the setup; once it's running, show the plain form.
+      setTrackerGuide(!c.enabled);
     });
   }, []);
 
@@ -114,14 +118,7 @@ export default function Settings({
 
   async function testTracker() {
     setTrackerTest("확인 중…");
-    try {
-      const resp = await fetch(`${tracker.url.trim().replace(/\/+$/, "")}/status?ids=`, {
-        headers: { Authorization: `Bearer ${tracker.token.trim()}` },
-      });
-      setTrackerTest(resp.ok ? "연결됐습니다." : resp.status === 401 ? "토큰이 맞지 않습니다." : `오류 (${resp.status})`);
-    } catch (e) {
-      setTrackerTest(`연결 실패: ${e}`);
-    }
+    setTrackerTest((await testTrackerConnection(tracker.url, tracker.token)).message);
   }
 
   useEffect(() => {
@@ -324,35 +321,52 @@ export default function Settings({
         <div className="st-toggle-hint">
           보내는 메일에 1×1 이미지를 넣어 상대가 열었는지 추정합니다. 상대에게 표시되지 않으니 사내 정책을 확인하세요.
         </div>
-        <div className="seg" style={{ margin: "8px 0" }}>
-          <label className="seg-opt">
-            <input type="radio" name="st-track" checked={!tracker.enabled} onChange={() => updateTracker({ enabled: false })} />
-            끔
-          </label>
-          <label className="seg-opt">
-            <input type="radio" name="st-track" checked={tracker.enabled} onChange={() => updateTracker({ enabled: true })} />
-            켬
-          </label>
-        </div>
-        <input
-          className="input"
-          style={{ width: "100%", marginBottom: 6 }}
-          placeholder="트래커 주소 (https://correo-tracker.xxx.workers.dev)"
-          value={tracker.url}
-          onChange={(e) => updateTracker({ url: e.target.value })}
-        />
-        <input
-          className="input"
-          style={{ width: "100%", marginBottom: 6 }}
-          type="password"
-          placeholder="API 토큰"
-          value={tracker.token}
-          onChange={(e) => updateTracker({ token: e.target.value })}
-        />
-        <button className="btn btn-secondary" disabled={!tracker.url || !tracker.token} onClick={testTracker}>
-          연결 테스트
-        </button>
-        {trackerTest && <span className="text-muted" style={{ marginLeft: 8, fontSize: 12 }}>{trackerTest}</span>}
+        {trackerGuide === true && (
+          <>
+            <TrackerGuide tracker={tracker} onChange={updateTracker} />
+            {tracker.enabled && (
+              <button className="btn btn-ghost" onClick={() => setTrackerGuide(false)}>
+                안내 닫기
+              </button>
+            )}
+          </>
+        )}
+        {trackerGuide === false && (
+          <>
+            <div className="seg" style={{ margin: "8px 0" }}>
+              <label className="seg-opt">
+                <input type="radio" name="st-track" checked={!tracker.enabled} onChange={() => updateTracker({ enabled: false })} />
+                끔
+              </label>
+              <label className="seg-opt">
+                <input type="radio" name="st-track" checked={tracker.enabled} onChange={() => updateTracker({ enabled: true })} />
+                켬
+              </label>
+            </div>
+            <input
+              className="input"
+              style={{ width: "100%", marginBottom: 6 }}
+              placeholder="트래커 주소 (https://correo-tracker.xxx.workers.dev)"
+              value={tracker.url}
+              onChange={(e) => updateTracker({ url: e.target.value })}
+            />
+            <input
+              className="input"
+              style={{ width: "100%", marginBottom: 6 }}
+              type="password"
+              placeholder="API 토큰"
+              value={tracker.token}
+              onChange={(e) => updateTracker({ token: e.target.value })}
+            />
+            <button className="btn btn-secondary" disabled={!tracker.url || !tracker.token} onClick={testTracker}>
+              연결 테스트
+            </button>
+            <button className="btn btn-ghost" style={{ marginLeft: 6 }} onClick={() => setTrackerGuide(true)}>
+              설정 안내 다시 보기
+            </button>
+            {trackerTest && <span className="text-muted" style={{ marginLeft: 8, fontSize: 12 }}>{trackerTest}</span>}
+          </>
+        )}
       </div>
 
       <TelegramSettings />

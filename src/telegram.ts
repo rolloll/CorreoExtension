@@ -68,6 +68,28 @@ export async function findChatId(botToken: string): Promise<string | null> {
   return null;
 }
 
+export interface BotInfo {
+  username: string;
+  name: string;
+}
+
+// Validates a pasted token and tells us the bot's @username (so the guide can
+// link straight to it).
+export async function getBotInfo(botToken: string): Promise<BotInfo> {
+  const resp = await fetch(`https://api.telegram.org/bot${botToken.trim()}/getMe`);
+  const data = (await resp.json().catch(() => null)) as {
+    ok?: boolean;
+    description?: string;
+    result?: { username?: string; first_name?: string };
+  } | null;
+  if (!resp.ok || !data?.ok || !data.result?.username) {
+    throw new Error(
+      resp.status === 401 || resp.status === 404 ? "토큰이 올바르지 않습니다." : data?.description || `텔레그램 오류 (${resp.status})`,
+    );
+  }
+  return { username: data.result.username, name: data.result.first_name ?? data.result.username };
+}
+
 function formatMail(m: IncomingMail): string {
   return `📧 ${m.subject.slice(0, 500)}\n보낸 사람: ${m.from.slice(0, 200)}\n받는 주소: ${m.matched}`;
 }

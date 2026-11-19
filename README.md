@@ -16,7 +16,10 @@ Gmail 라벨/답장 관리 + 주소록 + .eml 뷰어 Chrome 확장 프로그램 
 새 버전이 게시되면 12시간 이내에 시스템 알림이 뜨고, Correo를 열면 상단에도 안내가 나옵니다. 클릭하면 릴리스 페이지가 열립니다.
 설정 화면의 **업데이트 확인** 버튼으로 바로 확인할 수도 있습니다.
 
-1. `install.ps1`을 다시 실행합니다 (같은 폴더를 새 버전으로 덮어씁니다).
+1. PowerShell에 아래 한 줄을 붙여넣어 실행합니다 (zip을 받을 필요 없이 같은 폴더를 새 버전으로 덮어씁니다. Correo 상단 안내의 **업데이트 명령 복사** 버튼으로도 복사할 수 있습니다).
+   ```powershell
+   irm https://github.com/rolloll/CorreoExtension/releases/latest/download/install.ps1 | iex
+   ```
 2. `chrome://extensions`에서 Correo의 새로고침 버튼을 누릅니다.
 
 ## 개발

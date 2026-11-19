@@ -7,6 +7,11 @@
 // of a private repo.
 const GITHUB_REPO = "rolloll/CorreoExtension";
 
+// One line for PowerShell: downloads the latest release straight into
+// C:\Program Files (x86)\Correo (asks for admin itself), so no zip lands in
+// Downloads.
+export const INSTALL_COMMAND = `irm https://github.com/${GITHUB_REPO}/releases/latest/download/install.ps1 | iex`;
+
 export const UPDATE_INFO_KEY = "correo_update_info";
 const DISMISSED_KEY = "correo_update_dismissed";
 const NOTIFICATION_ID = "correo-update";

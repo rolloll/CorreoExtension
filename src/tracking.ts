@@ -88,3 +88,34 @@ export function findTracked(
 export function realHits(hits: Hit[], sentMs: number): Hit[] {
   return hits.filter((h) => h.t - sentMs > SELF_GRACE_MS);
 }
+
+export interface ConnectionResult {
+  ok: boolean;
+  message: string;
+}
+
+// Checks the whole chain: the Worker answers, the token matches, and the KV
+// namespace is bound. (/status?ids= with no ids never touches KV, so a missing
+// binding would pass; ?list=1 reads it.)
+export async function testTrackerConnection(url: string, token: string): Promise<ConnectionResult> {
+  const base = url.trim().replace(/\/+$/, "");
+  if (!/^https:\/\/.+/i.test(base)) return { ok: false, message: "주소는 https:// 로 시작해야 합니다." };
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/status?list=1`, { headers: { Authorization: `Bearer ${token.trim()}` } });
+  } catch {
+    return { ok: false, message: "서버에 연결하지 못했습니다. 주소를 다시 확인해 주세요 (Worker 화면 위쪽에 보이는 주소)." };
+  }
+  if (resp.status === 401) {
+    return { ok: false, message: "토큰이 맞지 않습니다. Cloudflare의 API_TOKEN 값이 위 토큰과 같은지 확인하세요." };
+  }
+  if (resp.status >= 500) {
+    return { ok: false, message: "서버는 응답했지만 저장소(KV)에 연결되지 않았습니다. Bindings에 OPENS가 추가됐는지 확인하세요." };
+  }
+  if (!resp.ok) return { ok: false, message: `오류 (${resp.status})` };
+  const body = await resp.json().catch(() => null);
+  if (!Array.isArray(body)) {
+    return { ok: false, message: "서버 코드가 아직 붙여넣어지지 않은 것 같습니다. 코드 붙여넣기 단계를 확인하세요." };
+  }
+  return { ok: true, message: "연결됐습니다. (서버·토큰·저장소 모두 정상)" };
+}

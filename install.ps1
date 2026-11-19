@@ -29,9 +29,15 @@ if (-not (Test-Writable $Dir)) {
       "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "-Dir", "`"$Dir`"", "-Repo", $Repo
     )
     exit
+  } else {
+    # Run as "irm <url> | iex": there is no file to relaunch, so relaunch the one-liner.
+    Write-Host "관리자 권한이 필요합니다. 권한 요청 창에서 '예'를 눌러 주세요..."
+    $url = "https://github.com/$Repo/releases/latest/download/install.ps1"
+    Start-Process powershell -Verb RunAs -ArgumentList @(
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm $url | iex"
+    )
+    return
   }
-  Write-Host "쓰기 권한이 없습니다. 관리자 권한 PowerShell에서 다시 실행해 주세요." -ForegroundColor Red
-  exit 1
 }
 
 try {
