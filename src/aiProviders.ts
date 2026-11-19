@@ -127,28 +127,77 @@ function isKeyRejected(status: number, body: string): boolean {
   return status === 401 || status === 403 || (status === 400 && /API[_ ]KEY[_ ]INVALID|api key not valid/i.test(body));
 }
 
-// POST JSON with a few retries on 429 / 5xx (honouring Retry-After).
-async function postJson(url: string, headers: Record<string, string>, body: unknown): Promise<unknown> {
+export interface CallOptions {
+  // Retries after a 429 / 5xx. The connection test uses 0 so it answers at once.
+  retries?: number;
+  timeoutMs?: number;
+}
+
+// Gemini puts the wait it wants in the error body: "retryDelay": "21s".
+function retryDelaySeconds(body: string): number {
+  const m = /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/.exec(body);
+  return m ? Number(m[1]) : 0;
+}
+
+// A 429 that waiting won't fix (daily/free quota used up or a model the plan
+// can't use) is reported immediately instead of being retried for ~15 seconds.
+function quotaExplanation(body: string): string | null {
+  const hopeless = /limit:\s*0|PerDay|per day|billing/i.test(body) || retryDelaySeconds(body) > 20;
+  if (!hopeless) return null;
+  return (
+    "한도 초과(429): 이 키의 사용량(무료 한도)을 다 썼거나, 이 모델은 현재 요금제로 쓸 수 없습니다. " +
+    "기다려도 해결되지 않아 바로 알려 드립니다. 다른 모델(모델 목록의 flash/mini 계열)을 고르거나 나중에 다시 시도하세요. " +
+    "서비스 응답: " +
+    body.replace(/\s+/g, " ").slice(0, 200)
+  );
+}
+
+// POST JSON with retries on 429 / 5xx and a request timeout.
+async function postJson(url: string, headers: Record<string, string>, body: unknown, opts: CallOptions = {}): Promise<unknown> {
+  const retries = opts.retries ?? 3;
+  const timeoutMs = opts.timeoutMs ?? 90_000;
   let delay = 2000;
   for (let attempt = 0; ; attempt++) {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify(body),
-    });
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    let resp: Response;
+    try {
+      resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") {
+        throw new Error(`응답이 ${Math.round(timeoutMs / 1000)}초 넘게 없어 중단했습니다.`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
     if (resp.ok) return resp.json();
     const text = await resp.text();
     if (isKeyRejected(resp.status, text)) throw new LlmAuthError(`키가 거부되었습니다 (${resp.status}): ${text.slice(0, 200)}`);
+    if (resp.status === 429) {
+      const why = quotaExplanation(text);
+      if (why) throw new Error(why);
+    }
     const retryable = resp.status === 429 || resp.status >= 500;
-    if (!retryable || attempt >= 3) throw new Error(`요청 실패 (${resp.status}): ${text.slice(0, 300)}`);
-    const retryAfter = Number(resp.headers.get("retry-after"));
-    await sleep(retryAfter > 0 ? retryAfter * 1000 : delay);
+    if (!retryable || attempt >= retries) throw new Error(`요청 실패 (${resp.status}): ${text.slice(0, 300)}`);
+    const hint = Number(resp.headers.get("retry-after")) || retryDelaySeconds(text);
+    await sleep(hint > 0 ? Math.min(hint * 1000, 20_000) : delay);
     delay *= 2;
   }
 }
 
-async function callAnthropic(cfg: ProviderConfig, system: string, user: string): Promise<string> {
-  const client = new Anthropic({ apiKey: cfg.apiKey.trim(), dangerouslyAllowBrowser: true, maxRetries: 4 });
+async function callAnthropic(cfg: ProviderConfig, system: string, user: string, opts: CallOptions): Promise<string> {
+  const client = new Anthropic({
+    apiKey: cfg.apiKey.trim(),
+    dangerouslyAllowBrowser: true,
+    maxRetries: opts.retries ?? 4,
+    ...(opts.timeoutMs ? { timeout: opts.timeoutMs } : {}),
+  });
   // `effort` is only accepted by the current model generation; sending it to
   // an older model id would be a 400.
   const supportsEffort = /^claude-(opus|sonnet|haiku|fable)-5/.test(cfg.model);
@@ -174,7 +223,7 @@ async function callAnthropic(cfg: ProviderConfig, system: string, user: string):
   }
 }
 
-async function callOpenAiCompatible(base: string, cfg: ProviderConfig, system: string, user: string): Promise<string> {
+async function callOpenAiCompatible(base: string, cfg: ProviderConfig, system: string, user: string, opts: CallOptions): Promise<string> {
   const data = (await postJson(
     `${trimSlash(base)}/chat/completions`,
     { Authorization: `Bearer ${cfg.apiKey.trim()}` },
@@ -185,11 +234,12 @@ async function callOpenAiCompatible(base: string, cfg: ProviderConfig, system: s
         { role: "user", content: user },
       ],
     },
+    opts,
   )) as { choices?: { message?: { content?: string | null } }[] };
   return data.choices?.[0]?.message?.content ?? "";
 }
 
-async function callGemini(cfg: ProviderConfig, system: string, user: string): Promise<string> {
+async function callGemini(cfg: ProviderConfig, system: string, user: string, opts: CallOptions): Promise<string> {
   const data = (await postJson(
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cfg.model.trim())}:generateContent`,
     { "x-goog-api-key": cfg.apiKey.trim() },
@@ -197,23 +247,24 @@ async function callGemini(cfg: ProviderConfig, system: string, user: string): Pr
       systemInstruction: { parts: [{ text: system }] },
       contents: [{ role: "user", parts: [{ text: user }] }],
     },
+    opts,
   )) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
   return (data.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("\n");
 }
 
-export async function callLlm(id: ProviderId, cfg: ProviderConfig, system: string, user: string): Promise<string> {
+export async function callLlm(id: ProviderId, cfg: ProviderConfig, system: string, user: string, opts: CallOptions = {}): Promise<string> {
   if (!cfg.apiKey.trim()) throw new LlmAuthError("API 키가 없습니다.");
   if (!cfg.model.trim()) throw new Error("모델 이름이 없습니다.");
   switch (id) {
     case "anthropic":
-      return callAnthropic(cfg, system, user);
+      return callAnthropic(cfg, system, user, opts);
     case "openai":
-      return callOpenAiCompatible("https://api.openai.com/v1", cfg, system, user);
+      return callOpenAiCompatible("https://api.openai.com/v1", cfg, system, user, opts);
     case "gemini":
-      return callGemini(cfg, system, user);
+      return callGemini(cfg, system, user, opts);
     case "custom":
       if (!cfg.baseUrl?.trim()) throw new Error("서비스 주소(Base URL)가 없습니다.");
-      return callOpenAiCompatible(cfg.baseUrl, cfg, system, user);
+      return callOpenAiCompatible(cfg.baseUrl, cfg, system, user, opts);
   }
 }
 

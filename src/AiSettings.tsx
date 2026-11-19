@@ -78,13 +78,18 @@ export default function AiSettings() {
   async function test() {
     setTesting(true);
     setTestMsg("확인 중…");
+    const started = Date.now();
+    const took = () => `${((Date.now() - started) / 1000).toFixed(1)}초`;
     try {
       if (cfg.active === "custom" && !(await ensureCustomHostAccess(current.baseUrl ?? ""))) {
         setTestMsg("이 서비스 주소에 접근할 권한이 필요합니다. 허용해 주세요.");
         return;
       }
-      const reply = await callLlm(cfg.active, current, "한 단어로만 답하세요.", "OK 라고 답하세요.");
-      setTestMsg(reply.trim() ? "연결됐습니다." : "연결은 됐지만 응답이 비어 있습니다. 모델 이름을 확인하세요.");
+      // No retries: a test should answer at once, not wait out a rate limit.
+      const reply = await callLlm(cfg.active, current, "한 단어로만 답하세요.", "OK 라고 답하세요.", { retries: 0, timeoutMs: 30_000 });
+      setTestMsg(
+        reply.trim() ? `연결됐습니다. (${took()})` : `연결은 됐지만 응답이 비어 있습니다. 모델 이름을 확인하세요. (${took()})`,
+      );
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       if (/\(404\)|not found|no longer available|not supported/i.test(message)) {
@@ -92,7 +97,7 @@ export default function AiSettings() {
         await loadModels();
         setTestMsg("모델을 바꿨다면 '연결 테스트'를 다시 눌러 확인하세요.");
       } else {
-        setTestMsg(`실패: ${message}`);
+        setTestMsg(`실패 (${took()}): ${message}`);
       }
     } finally {
       setTesting(false);
