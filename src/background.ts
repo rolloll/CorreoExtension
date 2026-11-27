@@ -1,4 +1,4 @@
-import { findSentThreadIds, markThreadResolved, addLabelToThread, listLabels, getUnreadCount, syncActivity, loadActivityCache } from "./gmail/api";
+import { findSentThreadIds, markThreadResolved, addLabelToThread, listLabels, getUnreadCount, syncActivity, loadActivityCache, labelMySentMail } from "./gmail/api";
 import { addThreadAsTask } from "./gmail/tasks";
 import { checkForUpdate, registerUpdateNotificationClick } from "./updateCheck";
 import { checkTelegram } from "./telegram";
@@ -26,6 +26,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === UNREAD_BADGE_ALARM) {
     void refreshUnreadBadge();
     void checkTelegram();
+    // Throttles itself to every few minutes; a missing label is skipped, never created.
+    void labelMySentMail();
   }
   if (alarm.name === UPDATE_CHECK_ALARM) void checkForUpdate();
 });

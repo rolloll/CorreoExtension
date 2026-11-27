@@ -73,6 +73,10 @@
   padding: 2px 0; border: 1px solid var(--color-neutral-300, #c8ced6); color: var(--color-neutral-700);
 }
 .dv-dir.sent { background: var(--color-accent); border-color: var(--color-accent); color: #fff; }
+/* Sent by me directly vs. a group copy filed under Sent (written by someone else) */
+.dv-dir.mine { width: auto; min-width: 34px; padding: 2px 6px; font-weight: 700; background: #c2410c; border-color: #c2410c; color: #fff; }
+.dv-dir.other { width: auto; min-width: 34px; padding: 2px 6px; background: #fff; border-color: #c2410c; color: #c2410c; }
+.dv-item.mine-row { box-shadow: inset 3px 0 0 #c2410c; }
 .dv-item-body { flex: 1; min-width: 0; }
 .dv-item-row { display: flex; align-items: baseline; gap: 6px; }
 .dv-item-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: auto; }

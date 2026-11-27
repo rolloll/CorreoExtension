@@ -168,8 +168,8 @@ export default function DayView() {
       if (
         fresh > 0 &&
         !window.confirm(
-          `${fresh}건을 ${providerLabel(cfg.active)}(${provider.model})로 요약합니다.\n\n` +
-            "· 각 메일의 제목·보낸 사람·본문이 해당 서비스로 전송됩니다.\n" +
+          `대화 ${fresh}건을 ${providerLabel(cfg.active)}(${provider.model})로 요약합니다.\n\n` +
+            "· 각 메일이 속한 대화 전체(제목·보낸 사람·본문)가 해당 서비스로 전송됩니다.\n" +
             "· 서비스 이용료가 발생할 수 있습니다 (이미 요약한 메일은 저장본을 씁니다).\n\n계속할까요?",
         )
       ) {
@@ -352,7 +352,7 @@ export default function DayView() {
         >
           추출 ({shown.length}건)
         </button>
-        <label className="dv-export-ai" title="설정 → AI 요약에서 저장한 API 키로 각 메일을 1~3줄로 요약해 파일에 넣습니다">
+        <label className="dv-export-ai" title="설정 → AI 요약에서 저장한 API 키로 각 메일이 속한 대화 전체를 읽고 요약해 파일에 넣습니다">
           <input type="checkbox" checked={withSummary} onChange={(e) => setWithSummary(e.target.checked)} />
           AI 요약 포함
         </label>
@@ -401,8 +401,25 @@ export default function DayView() {
           return (
             <div key={m.messageId}>
               {showDay && <div className="dv-day">{dayHeading(day)}</div>}
-              <div className={`dv-item ${m.toMe ? "to-me" : ""}`} onClick={() => openThread(m.threadId)} title="Gmail에서 열기">
-                <span className={`dv-dir ${m.direction}`}>{m.direction === "sent" ? "보냄" : "받음"}</span>
+              <div
+                className={`dv-item ${m.toMe ? "to-me" : ""} ${m.direction === "sent" && m.mine ? "mine-row" : ""}`}
+                onClick={() => openThread(m.threadId)}
+                title="Gmail에서 열기"
+              >
+                {/* Mail in Gmail's Sent folder is "mine" only if I sent it myself; a group-delivered copy
+                    (List-Id) that Gmail filed under Sent was written by someone else. */}
+                <span
+                  className={`dv-dir ${m.direction}${m.direction === "sent" ? (m.mine ? " mine" : " other") : ""}`}
+                  title={
+                    m.direction === "sent"
+                      ? m.mine
+                        ? "내가 직접 보낸 메일"
+                        : "내 주소로 표시됐지만 다른 사람이 보낸 메일"
+                      : undefined
+                  }
+                >
+                  {m.direction === "sent" ? (m.mine ? "내가 보냄" : "타인 발송") : "받음"}
+                </span>
                 <div className="dv-item-body">
                   <div className="dv-item-row">
                     <span className="dv-item-name">{peerText}</span>

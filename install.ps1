@@ -171,7 +171,18 @@ catch {
     $underProgramFiles = $Dir.StartsWith(${env:ProgramFiles(x86)}, [StringComparison]::OrdinalIgnoreCase) -or $Dir.StartsWith($env:ProgramFiles, [StringComparison]::OrdinalIgnoreCase)
     $isElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if ($underProgramFiles -and $isElevated) {
-      icacls "$Dir" /grant "${env:USERDOMAIN}\${env:USERNAME}:(OI)(CI)M" /T /C /Q 2>&1 | Out-Null
+      # Under $ErrorActionPreference = "Stop", Windows PowerShell 5.1 turns anything icacls
+      # writes to stderr (even a harmless "failed processing 1 files") into a terminating
+      # error. This grant is best-effort, so it must never abort the install.
+      $prevEap = $ErrorActionPreference
+      $ErrorActionPreference = "Continue"
+      try {
+        icacls "$Dir" /grant "${env:USERDOMAIN}\${env:USERNAME}:(OI)(CI)M" /T /C /Q 2>&1 | Out-Null
+      } catch {
+        # ignore
+      } finally {
+        $ErrorActionPreference = $prevEap
+      }
     }
 
     # Install the update helper and register it for Chrome (per-user, no admin).

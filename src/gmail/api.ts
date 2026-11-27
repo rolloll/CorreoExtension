@@ -718,7 +718,7 @@ export async function syncActivity(days: number): Promise<ActivitySummary> {
 
     for (const msg of thread.messages) {
       const fromAddrs = senderAddresses(msg, myAddrs);
-      const isMine = fromAddrs.some((a) => myAddrs.has(a.addr));
+      const isMine = isMyMessage(msg, fromAddrs, myAddrs);
       const ts = msg.internalDate ? parseInt(msg.internalDate, 10) : null;
 
       if (isMine) {
@@ -753,7 +753,7 @@ export async function syncActivity(days: number): Promise<ActivitySummary> {
 
     const lastMsg = thread.messages[thread.messages.length - 1];
     const lastFromAddrs = senderAddresses(lastMsg, myAddrs);
-    const lastIsMine = lastFromAddrs.some((a) => myAddrs.has(a.addr));
+    const lastIsMine = isMyMessage(lastMsg, lastFromAddrs, myAddrs);
     const lastTs = lastMsg.internalDate ? parseInt(lastMsg.internalDate, 10) : null;
 
     // Inbox-wide tag: was I addressed directly (To) or only Cc'd, and does
@@ -904,6 +904,10 @@ export interface DayMessage {
   fromAddrs: { addr: string; name: string | null }[];
   toAddrs: { addr: string; name: string | null }[];
   ccAddrs: { addr: string; name: string | null }[];
+  // Sent by me directly: in Gmail's Sent folder and not a mailing-list copy.
+  // A group copy whose From is my send-as alias is also filed under SENT, but
+  // someone else (or an outside company) wrote it - see isMyMessage().
+  mine: boolean;
 }
 
 const RANGE_MESSAGE_CAP = 1000;
@@ -926,16 +930,22 @@ export interface RangeOptions {
 
 // Message headers never change, so they're kept between visits: re-opening a
 // range (or widening it) only fetches the messages not seen before.
-// v2: entries now include the Delivered-To header (needed for the account filter).
-const RANGE_CACHE_KEY = "correo_range_meta_cache_v2";
-const OLD_RANGE_CACHE_KEY = "correo_range_meta_cache";
+// v3: entries are fetched with a fields mask and now keep labelIds (SENT).
+const RANGE_CACHE_KEY = "correo_range_meta_cache_v3";
+const OLD_RANGE_CACHE_KEYS = ["correo_range_meta_cache", "correo_range_meta_cache_v2"];
 const RANGE_CACHE_MAX = 4000;
 type RangeMeta = MessageMeta & { id: string; threadId: string };
 
+// Parsing the stored cache (thousands of entries) on every visit is slow, so
+// it is kept in memory for the lifetime of the page.
+let rangeCacheMem: Record<string, RangeMeta> | null = null;
+
 async function loadRangeCache(): Promise<Record<string, RangeMeta>> {
-  void chrome.storage.local.remove(OLD_RANGE_CACHE_KEY);
+  if (rangeCacheMem) return rangeCacheMem;
+  void chrome.storage.local.remove(OLD_RANGE_CACHE_KEYS);
   const s = await chrome.storage.local.get(RANGE_CACHE_KEY);
-  return (s[RANGE_CACHE_KEY] as Record<string, RangeMeta> | undefined) ?? {};
+  rangeCacheMem = (s[RANGE_CACHE_KEY] as Record<string, RangeMeta> | undefined) ?? {};
+  return rangeCacheMem;
 }
 
 async function saveRangeCache(cache: Record<string, RangeMeta>): Promise<void> {
@@ -946,6 +956,184 @@ async function saveRangeCache(cache: Record<string, RangeMeta>): Promise<void> {
     entries = entries.slice(0, RANGE_CACHE_MAX);
   }
   await chrome.storage.local.set({ [RANGE_CACHE_KEY]: Object.fromEntries(entries) });
+}
+
+// ---- Batched metadata fetch ----
+// Gmail's batch endpoint answers many sub-requests in one HTTP call; for a
+// range of a few hundred messages that is much faster than one call each. The
+// fields mask also trims every response down to what the view reads.
+
+const BATCH_SIZE = 50;
+const BATCH_PARALLEL = 4;
+
+function metadataPath(id: string): string {
+  const params = new URLSearchParams({
+    format: "metadata",
+    fields: "id,threadId,internalDate,labelIds,payload/headers",
+  });
+  for (const h of SENDER_HEADERS) params.append("metadataHeaders", h);
+  return `/gmail/v1/users/me/messages/${id}?${params.toString()}`;
+}
+
+interface BatchItem {
+  status: number;
+  json: RangeMeta | null;
+}
+
+async function fetchMetadataBatch(ids: string[], token: string): Promise<(BatchItem | null)[]> {
+  const boundary = `correo_${Math.random().toString(36).slice(2)}`;
+  let body = "";
+  ids.forEach((id, i) => {
+    body += `--${boundary}\r\nContent-Type: application/http\r\nContent-ID: <item${i}>\r\n\r\nGET ${metadataPath(id)}\r\n\r\n`;
+  });
+  body += `--${boundary}--`;
+  const resp = await fetch("https://www.googleapis.com/batch/gmail/v1", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": `multipart/mixed; boundary=${boundary}` },
+    body,
+  });
+  if (!resp.ok) throw new Error(`batch ${resp.status}`);
+  const m = /boundary="?([^";]+)"?/i.exec(resp.headers.get("content-type") || "");
+  if (!m) throw new Error("batch boundary");
+  const text = (await resp.text()).replace(/\r\n/g, "\n");
+  const out: (BatchItem | null)[] = new Array(ids.length).fill(null);
+  for (const part of text.split(`--${m[1]}`)) {
+    const cid = /Content-ID:\s*<response-item(\d+)>/i.exec(part);
+    if (!cid) continue;
+    const h = part.indexOf("HTTP/");
+    if (h < 0) continue;
+    const st = /HTTP\/[\d.]+\s+(\d+)/.exec(part.slice(h));
+    let json: RangeMeta | null = null;
+    const sep = part.indexOf("\n\n", h);
+    if (sep >= 0) {
+      try {
+        json = JSON.parse(part.slice(sep + 2).trim()) as RangeMeta;
+      } catch {
+        // Leave json null; the caller treats it as a miss.
+      }
+    }
+    out[+cid[1]] = { status: st ? +st[1] : 0, json };
+  }
+  return out;
+}
+
+// Headers for `ids`, from the cache where possible. Misses are fetched in
+// batches; whatever a batch can't deliver (throttled, odd response) falls back
+// to one request each, which has its own retry.
+async function fetchRangeMetas(
+  ids: string[],
+  cache: Record<string, RangeMeta>,
+  opts: RangeOptions,
+  onFetched: () => void,
+  onDone: () => void,
+): Promise<(RangeMeta | null)[]> {
+  const out: (RangeMeta | null)[] = new Array(ids.length).fill(null);
+  const missing: number[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    const hit = cache[ids[i]];
+    if (hit) {
+      out[i] = hit;
+      onDone();
+    } else {
+      missing.push(i);
+    }
+  }
+  if (missing.length === 0) return out;
+
+  let token: string | null = null;
+  try {
+    token = await getAuthToken(false);
+  } catch {
+    // The per-message fallback below reports/handles auth problems.
+  }
+  const chunks: number[][] = [];
+  for (let i = 0; i < missing.length; i += BATCH_SIZE) chunks.push(missing.slice(i, i + BATCH_SIZE));
+
+  let pause = 0; // grows while Gmail throttles, shrinks while it doesn't
+  async function runChunk(chunk: number[]): Promise<void> {
+    let pending = chunk.slice();
+    if (token) {
+      for (let attempt = 0; attempt < 5 && pending.length > 0; attempt++) {
+        if (opts.isCancelled?.()) return;
+        if (pause) await sleep(pause);
+        let res: (BatchItem | null)[];
+        try {
+          res = await fetchMetadataBatch(
+            pending.map((i) => ids[i]),
+            token,
+          );
+        } catch {
+          break;
+        }
+        const retry: number[] = [];
+        let throttled = false;
+        pending.forEach((idx, k) => {
+          const r = res[k];
+          if (r && r.status === 200 && r.json && r.json.id) {
+            cache[ids[idx]] = r.json;
+            out[idx] = r.json;
+            onFetched();
+            onDone();
+          } else if (r && (r.status === 429 || r.status === 403 || r.status >= 500)) {
+            retry.push(idx);
+            throttled = true;
+          } else if (r && r.status >= 400) {
+            onDone(); // gone/forbidden: nothing to retry
+          } else {
+            retry.push(idx);
+          }
+        });
+        pending = retry;
+        if (throttled) {
+          pause = Math.min(2000, (pause || 250) * 2);
+          const wait = Math.min(4000, 500 * 2 ** attempt);
+          rateLimitWaitedMs += wait;
+          await sleep(wait);
+        } else {
+          pause = Math.max(0, pause - 100);
+        }
+      }
+    }
+    if (pending.length > 0) {
+      await mapWithConcurrency(pending, 4, async (idx) => {
+        if (opts.isCancelled?.()) return;
+        const params = new URLSearchParams({ format: "metadata" });
+        for (const h of SENDER_HEADERS) params.append("metadataHeaders", h);
+        try {
+          const m = await gmailJson<RangeMeta>(`/messages/${ids[idx]}?${params.toString()}`, "메일 조회");
+          cache[ids[idx]] = m;
+          out[idx] = m;
+          onFetched();
+        } catch {
+          // Leave it out of this view; the next visit tries again.
+        } finally {
+          onDone();
+        }
+      });
+    }
+  }
+
+  const queue = chunks.slice();
+  await Promise.all(
+    Array.from({ length: Math.min(BATCH_PARALLEL, queue.length) }, async () => {
+      for (;;) {
+        if (opts.isCancelled?.()) return;
+        const chunk = queue.shift();
+        if (!chunk) return;
+        await runChunk(chunk);
+      }
+    }),
+  );
+  return out;
+}
+
+// Gmail marks a message SENT whenever its From is one of my send-as aliases -
+// including a copy a Google Group re-delivered to me, whose real author is
+// someone else (or an outside company). Those copies carry a List-Id header;
+// a message I sent myself never does. So "mine" = my address in From AND no
+// List-Id.
+function isMyMessage(msg: MessageMeta, fromAddrs: { addr: string }[], myAddrs: Set<string>): boolean {
+  return fromAddrs.some((a) => myAddrs.has(a.addr)) && !headerValue(msg, "List-Id");
 }
 
 // Every message sent or received between two local calendar days, inclusive
@@ -964,7 +1152,9 @@ export async function listMessagesInRange(
   const startSec = Math.floor(new Date(y1, m1 - 1, d1).getTime() / 1000);
   const endSec = Math.floor(new Date(y2, m2 - 1, d2 + 1).getTime() / 1000);
 
-  const { all: myAddrs } = await loadMyAddresses();
+  // The address lookup runs alongside the message listing instead of before it.
+  const myAddrsPromise = loadMyAddresses();
+  myAddrsPromise.catch(() => {});
 
   let ids: string[] = [];
   let pageToken: string | undefined;
@@ -982,32 +1172,24 @@ export async function listMessagesInRange(
     ids.push(...(data.messages || []).map((x) => x.id));
     pageToken = data.nextPageToken;
   } while (pageToken && ids.length < RANGE_MESSAGE_CAP);
+  const { all: myAddrs } = await myAddrsPromise;
   const truncated = ids.length >= RANGE_MESSAGE_CAP && !!pageToken;
   ids = ids.slice(0, RANGE_MESSAGE_CAP);
 
   const cache = await loadRangeCache();
   let fetched = 0;
   let done = 0;
-  const metas = await mapWithConcurrency(ids, 8, async (id) => {
-    // A newer query superseded this one: stop spending quota on it.
-    if (opts.isCancelled?.()) return null;
-    if (cache[id]) {
-      opts.onProgress?.(++done, ids.length);
-      return cache[id];
-    }
-    const params = new URLSearchParams({ format: "metadata" });
-    for (const h of SENDER_HEADERS) params.append("metadataHeaders", h);
-    try {
-      const m = await gmailJson<RangeMeta>(`/messages/${id}?${params.toString()}`, "메일 조회");
+  const metas = await fetchRangeMetas(
+    ids,
+    cache,
+    opts,
+    () => {
       fetched++;
-      cache[id] = m;
-      return m;
-    } catch {
-      return null;
-    } finally {
+    },
+    () => {
       opts.onProgress?.(++done, ids.length);
-    }
-  });
+    },
+  );
   if (!opts.isCancelled?.() && fetched > 0) {
     // Only persist what this range (or earlier ones) fetched; failures stay out.
     void saveRangeCache(cache).catch(() => {});
@@ -1020,7 +1202,8 @@ export async function listMessagesInRange(
     const from = senderAddresses(msg, myAddrs);
     const to = extractAddresses(headerValue(msg, "To") || "");
     const cc = extractAddresses(headerValue(msg, "Cc") || "");
-    const isMine = from.some((a) => myAddrs.has(a.addr));
+    // A group copy whose From is my alias is "received", not "sent".
+    const isMine = isMyMessage(msg, from, myAddrs);
     const delivered = headerValues(msg, "Delivered-To");
     if (!matchesAccount(opts.account ?? "", isMine, from, to, cc, delivered)) continue;
     if (!matchesCounterpart(counterpart, isMine, from, to, cc, myAddrs)) continue;
@@ -1039,6 +1222,7 @@ export async function listMessagesInRange(
       fromAddrs: from,
       toAddrs: to,
       ccAddrs: cc,
+      mine: (msg.labelIds ?? []).includes("SENT") && !headerValue(msg, "List-Id"),
     });
   }
   // Account / counterpart filters were applied per message above.
@@ -1154,6 +1338,160 @@ export async function getMessageText(messageId: string): Promise<string> {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   return text.length > BODY_TEXT_CAP ? text.slice(0, BODY_TEXT_CAP) : text;
+}
+
+// ---- Whole-thread text (for AI summaries) ----
+// A short reply ("확인했습니다") says nothing without the mail it answers, and
+// the launch date / promotion period usually sit in the other side's first
+// mail. So summaries are made from the whole conversation.
+
+interface ThreadFullMessage {
+  id: string;
+  internalDate?: string;
+  labelIds?: string[];
+  payload?: MessagePart & { headers?: HeaderKV[] };
+}
+
+const FIRST_LAST_BODY_CAP = 12000;
+const MIDDLE_BODY_CAP = 3000;
+const TRANSCRIPT_CAP = 40000;
+
+// Message text without the quoted history: ">" lines, "... wrote:" lines and,
+// for HTML-only mail, <blockquote> blocks (a forwarded message is not in a
+// blockquote, so forwards keep their content).
+function messageBodyText(payload: MessagePart): string {
+  let raw = findPartText(payload, "text/plain");
+  if (raw === null) {
+    let html = findPartText(payload, "text/html") ?? "";
+    let prev: string;
+    do {
+      prev = html;
+      html = html.replace(/<blockquote[^>]*>(?:(?!<blockquote)[\s\S])*?<\/blockquote>/gi, " ");
+    } while (html !== prev);
+    raw = htmlToText(html);
+  }
+  return raw
+    .split(/\r?\n/)
+    .filter((l) => !l.trim().startsWith(">") && !/(wrote:|작성:)\s*$/.test(l.trim()))
+    .join("\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// The conversation `threadId` belongs to, oldest mail first, as one text for
+// the model, plus the id of its newest mail (summary cache key). Drafts are
+// left out.
+export async function getThreadTranscript(threadId: string): Promise<{ lastMessageId: string; text: string } | null> {
+  const thread = await gmailJson<{ messages?: ThreadFullMessage[] }>(`/threads/${threadId}?format=full`, "대화 조회");
+  const msgs = (thread.messages ?? [])
+    .filter((m) => !(m.labelIds ?? []).includes("DRAFT"))
+    .sort((a, b) => Number(a.internalDate) - Number(b.internalDate));
+  const last = msgs[msgs.length - 1];
+  if (!last) return null;
+  const parts = msgs.map((m, i) => {
+    let body = messageBodyText(m.payload ?? {});
+    const cap = i === 0 || i === msgs.length - 1 ? FIRST_LAST_BODY_CAP : MIDDLE_BODY_CAP;
+    if (body.length > cap) body = body.slice(0, cap) + "\n…(이하 생략)";
+    const when = m.internalDate ? new Date(parseInt(m.internalDate, 10)).toLocaleString("ko-KR") : "";
+    const from = m.payload?.headers?.find((h) => h.name.toLowerCase() === "from")?.value ?? "";
+    const tag = i === msgs.length - 1 ? " · 가장 최근 메일" : "";
+    return `[${i + 1}/${msgs.length}${tag}] ${when} | 보낸 사람: ${from}\n${body || "(본문 없음)"}`;
+  });
+  const text = parts.join("\n\n-----\n\n");
+  return { lastMessageId: last.id, text: text.length > TRANSCRIPT_CAP ? text.slice(0, TRANSCRIPT_CAP) : text };
+}
+
+// ---- Label for mail I sent myself ----
+// Gmail files group copies whose From is my alias under "Sent" too, so the
+// Sent folder can't tell my mail from a colleague's or a vendor's. This puts
+// a label of my choice on the conversations I really sent (no List-Id).
+//
+// The label's name is never baked into the code (it gets renamed): public/
+// sent-label.txt names it once, the Gmail label ID is then remembered and
+// survives renames. A missing label is never created.
+
+const SENT_LABEL_ID_KEY = "correo_sent_label_id";
+const SENT_LABEL_JOB_KEY = "correo_label_job";
+const SENT_LABEL_MIN_GAP_MS = 4 * 60_000;
+const SENT_LABEL_FIRST_DAYS = 45; // first run after (re)loading: catch up
+const SENT_LABEL_DAYS = 2;
+const SENT_LABEL_MAX_CHECK = 150; // header lookups per run
+const SENT_LABEL_MAX_APPLY = 50; // conversations labelled per run
+
+let sentLabelBusy = false;
+let sentLabelAt = 0;
+let sentLabelFirst = true;
+const sentLabelDone = new Set<string>(); // threads already labelled
+const sentLabelSkip = new Set<string>(); // messages that need no label
+
+async function resolveSentLabelId(): Promise<string> {
+  const labels = (await gmailJson<{ labels?: LabelOut[] }>("/labels", "라벨 목록 조회")).labels ?? [];
+  const stored = (await chrome.storage.local.get(SENT_LABEL_ID_KEY))[SENT_LABEL_ID_KEY] as string | undefined;
+  if (stored && labels.some((l) => l.id === stored)) return stored;
+  const name = (await (await fetch(chrome.runtime.getURL("sent-label.txt"))).text()).trim();
+  const found = name ? labels.find((l) => l.name === name) : undefined;
+  if (!found) throw new Error(`라벨 '${name}' 이(가) 없어 건너뜀 (새로 만들지 않음)`);
+  await chrome.storage.local.set({ [SENT_LABEL_ID_KEY]: found.id });
+  return found.id;
+}
+
+// Puts the label on conversations I sent myself. Runs from the minute alarm,
+// but at most every few minutes; the outcome is kept in storage
+// (correo_label_job) so a failure can be read afterwards.
+export async function labelMySentMail(): Promise<void> {
+  if (sentLabelBusy || Date.now() - sentLabelAt < SENT_LABEL_MIN_GAP_MS) return;
+  sentLabelBusy = true;
+  sentLabelAt = Date.now();
+  let labeled = 0;
+  let checked = 0;
+  let error: string | null = null;
+  try {
+    const info = await loadAddressInfo();
+    const labelId = await resolveSentLabelId();
+    const days = sentLabelFirst ? SENT_LABEL_FIRST_DAYS : SENT_LABEL_DAYS;
+    const todo = new Map<string, true>();
+    for (const addr of new Set(info.sendAs)) {
+      let pageToken = "";
+      for (let page = 0; page < 5; page++) {
+        const params = new URLSearchParams({ q: `in:sent newer_than:${days}d from:${addr}`, maxResults: "100" });
+        if (pageToken) params.set("pageToken", pageToken);
+        const list = await gmailJson<{ messages?: { id: string; threadId: string }[]; nextPageToken?: string }>(
+          `/messages?${params.toString()}`,
+          "보낸 메일 라벨 대상 조회",
+        );
+        for (const m of list.messages ?? []) {
+          if (sentLabelDone.has(m.threadId) || sentLabelSkip.has(m.id) || todo.has(m.threadId)) continue;
+          if (checked >= SENT_LABEL_MAX_CHECK) continue;
+          checked++;
+          const msg = await gmailJson<MessageMeta>(
+            `/messages/${m.id}?format=metadata&metadataHeaders=List-Id&fields=id,labelIds,payload/headers`,
+            "보낸 메일 헤더 조회",
+          );
+          // Already labelled, or a group copy: nothing to do.
+          if ((msg.labelIds ?? []).includes(labelId) || headerValue(msg, "List-Id")) sentLabelSkip.add(m.id);
+          else todo.set(m.threadId, true);
+        }
+        pageToken = list.nextPageToken ?? "";
+        if (!pageToken) break;
+      }
+    }
+    for (const threadId of [...todo.keys()].slice(0, SENT_LABEL_MAX_APPLY)) {
+      await addLabelToThread(threadId, labelId);
+      sentLabelDone.add(threadId);
+      labeled++;
+    }
+    if (checked < SENT_LABEL_MAX_CHECK && todo.size <= SENT_LABEL_MAX_APPLY) sentLabelFirst = false;
+  } catch (e) {
+    error = String(e);
+  } finally {
+    sentLabelBusy = false;
+  }
+  try {
+    await chrome.storage.local.set({ [SENT_LABEL_JOB_KEY]: { at: Date.now(), labeled, checked, error } });
+  } catch {
+    // Storage hiccup: the label work itself is already done.
+  }
 }
 
 // ---- New inbox mail addressed to given accounts (for Telegram alerts) ----

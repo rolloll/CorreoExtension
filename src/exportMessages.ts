@@ -5,7 +5,7 @@ export type GroupLabeler = (m: DayMessage) => string;
 
 export interface ExportOptions {
   groupOf?: GroupLabeler;
-  // messageId -> 1-3 line summary; adds a 요약 column / line when given.
+  // messageId -> summary of the mail's whole conversation; adds a 요약 column / line when given.
   summaries?: Record<string, string>;
 }
 
@@ -26,6 +26,13 @@ function fmtTime(ms: number): string {
 
 function csvCell(s: string): string {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+// A sent-folder mail is "나" only if I sent it myself; a group copy that Gmail
+// filed under Sent was written by someone else ("타인").
+function directionLabel(m: DayMessage): string {
+  if (m.direction !== "sent") return "받음";
+  return m.mine ? "보냄(나)" : "보냄(타인)";
 }
 
 // Oldest first reads more naturally in a file than the on-screen newest-first.
@@ -51,7 +58,7 @@ export function buildExport(messages: DayMessage[], format: ExportFormat, opts: 
       header,
       ...rows.map((m) => [
         fmtTime(m.timeMs),
-        m.direction === "sent" ? "보냄" : "받음",
+        directionLabel(m),
         ...(groupOf ? [groupOf(m)] : []),
         m.subject,
         // One line per cell keeps the CSV easy to filter and sort.
@@ -68,7 +75,7 @@ export function buildExport(messages: DayMessage[], format: ExportFormat, opts: 
     rows
       .map((m) => {
         const out = [
-          `[${fmtTime(m.timeMs)}] ${m.direction === "sent" ? "보냄" : "받음"}${groupOf ? ` [${groupOf(m)}]` : ""}`,
+          `[${fmtTime(m.timeMs)}] ${directionLabel(m)}${groupOf ? ` [${groupOf(m)}]` : ""}`,
           `제목: ${m.subject}`,
         ];
         const summary = summaries?.[m.messageId];

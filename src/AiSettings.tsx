@@ -108,7 +108,7 @@ export default function AiSettings() {
     <div className="st-block">
       <div className="st-block-title">AI 요약 (기간 탭 추출)</div>
       <div className="st-toggle-hint">
-        기간 탭에서 메일 목록을 추출할 때 각 메일을 1~3줄로 요약합니다. 서비스별 키를 저장해 두고 아래에서 사용할 서비스를 고르세요.
+        기간 탭에서 메일 목록을 추출할 때 각 메일이 속한 대화 전체를 읽고 최대 5줄로 요약합니다. 서비스별 키를 저장해 두고 아래에서 사용할 서비스를 고르세요.
         요약할 때 메일 제목·보낸 사람·본문이 선택한 서비스로 전송되며 이용료가 발생할 수 있습니다. 키는 이 브라우저에만 저장됩니다(암호화되지 않음).
       </div>
       <div className="seg" style={{ margin: "8px 0" }}>
