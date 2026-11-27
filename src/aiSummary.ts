@@ -1,5 +1,5 @@
 import { getThreadTranscript, mapWithConcurrency, type DayMessage } from "./gmail/api";
-import { LlmAuthError, activeProvider, callLlm, type AiConfig } from "./aiProviders";
+import { LlmAuthError, activeProvider, callLlm, estimateCostUsd, type AiConfig } from "./aiProviders";
 
 // The summary is of the whole conversation (thread), based on its newest mail:
 // a short reply like "확인했습니다" means nothing without the mail it answers,
@@ -14,7 +14,17 @@ const SYSTEM_PROMPT = [
   "- 일정: 대화 전체에 나오는 날짜·기간·기한(론칭일, 서비스 시작일, 프로모션 시작일~종료일, 회신 기한, 납기, 회의 일시 등)을 모두 쓰고, 각각 무엇의 일정인지 밝히세요. 어디에도 없으면 '일정 미기재'.",
   "- 금액: 대화 전체에 나오는 모든 금액·가격·단가·수량(통화 단위 포함)을 쓰고, 각각 무엇에 대한 금액인지 밝히세요. 어디에도 없으면 '금액 미기재'.",
   "이 세 항목은 어떤 경우에도 생략하지 마세요. 대화에 있는 작품 제목·일정·금액을 빠뜨리는 것이 가장 큰 오류입니다. 단, 대화에 없는 내용은 지어내지 마세요.",
-  "둘째 줄부터는 대화의 전반적인 내용을 최대 4줄(각 줄 한 문장)로 요약하세요.",
+  "둘째 줄부터는 대화의 전반적인 내용을 최대 4줄로 요약하세요.",
+  "",
+  "[문체 - 업무 보고서(주간보고)에 그대로 옮겨 적는 개조식 단문]",
+  "- 각 줄은 짧은 단문(구)이며, 반드시 명사 또는 명사구로 끝냅니다. 예: '~ 프로모션 접수', '~ 확정', '~ 업로드 완료', '~ 요청 완료', '~ 진행 중', '~ 예정', '~ 확인 필요', '~ 회신 대기', '~ 협의'.",
+  "- '~합니다', '~했습니다', '~입니다', '~했다', '~요', '~됨' 같은 서술형·존댓말·평서문 어미는 쓰지 마세요. 주어, 조사 나열, 접속어도 줄이고 핵심어만 남기세요.",
+  "- 한 줄에 한 가지 사실만 담고, 길어도 40자 안팎으로 쓰세요. 날짜는 '12/9~12/29', '11/27~'처럼 짧게, 수량은 '신작 8종+구작 7종'처럼 숫자와 단위로 쓰세요. 작품명은 <작품명>으로 씁니다.",
+  "- 형식은 '플랫폼(거래처) - 내용 (기간)' 꼴을 따르세요.",
+  "  좋은 예: 카카오 - <작품명> 독자의선택 이벤트 (11/18~11/25) 확정",
+  "  좋은 예: 알라딘 - 12월 신작 8종+구작 7종 프로모션 접수",
+  "  좋은 예: 리디 - 마크다운 참여 작품 리스트 취합 중",
+  "  나쁜 예: 카카오에서 11월 18일부터 25일까지 독자의선택 이벤트를 진행하기로 확정했습니다.",
   "",
   "[추가 규칙]",
   "- 작품 론칭 또는 론칭 스펙 안내라면 서비스(플랫폼)와 언어판, 론칭일을 요약에도 쓰세요. 론칭일이 본문에 없으면 '론칭일 미기재'.",
@@ -47,10 +57,10 @@ async function saveCache(cache: Cache): Promise<void> {
   await chrome.storage.local.set({ [CACHE_KEY]: Object.fromEntries(kept.map((k) => [k, cache[k]])) });
 }
 
-// thr3: summaries are per conversation and use the current prompt (older keys
+// thr4: summaries are per conversation and use the current prompt (older keys
 // held per-message summaries and are simply never read again).
 function cacheKey(cfg: AiConfig, threadId: string): string {
-  return `${cfg.active}:${activeProvider(cfg).model}:thr3:${threadId}`;
+  return `${cfg.active}:${activeProvider(cfg).model}:thr4:${threadId}`;
 }
 
 // How many conversations behind these messages have no stored summary yet for
@@ -71,9 +81,72 @@ function tidy(text: string): string {
     .join("\n");
 }
 
+// What one run used. Filled in by summarizeMessages while it works.
+export interface UsageStats {
+  requests: number; // conversations sent to the AI service
+  reused: number; // conversations answered from the stored summary (free)
+  inputTokens: number;
+  outputTokens: number;
+  // Estimated dollars from the unit prices in the AI settings; null = no price entered.
+  costUsd: number | null;
+}
+
+export function newUsageStats(): UsageStats {
+  return { requests: 0, reused: 0, inputTokens: 0, outputTokens: 0, costUsd: null };
+}
+
 export interface SummarizeOptions {
   isCancelled?: () => boolean;
   onProgress?: (done: number, total: number) => void;
+  usage?: UsageStats;
+}
+
+// ---- Running total across all runs (shown in the AI settings) ----
+
+const USAGE_KEY = "correo_ai_usage";
+
+export interface UsageTotals {
+  since: number; // ms when counting (re)started
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  // Sum over the requests that had a unit price at the time; the rest add no cost.
+  costUsd: number;
+}
+
+export function formatCostUsd(usd: number): string {
+  // Cents-level amounts need more digits to be readable.
+  return `US$${usd < 1 ? usd.toFixed(4) : usd.toFixed(2)}`;
+}
+
+// "입력 12,345 · 출력 1,234 토큰 · 예상 US$0.0123" (cost only when a price is set)
+export function formatTokens(inputTokens: number, outputTokens: number, costUsd: number | null): string {
+  const n = (x: number) => x.toLocaleString("ko-KR");
+  const cost = costUsd === null ? " · 금액은 AI 설정에 단가를 넣으면 계산됩니다" : ` · 예상 ${formatCostUsd(costUsd)}`;
+  return `입력 ${n(inputTokens)} · 출력 ${n(outputTokens)} 토큰 (합계 ${n(inputTokens + outputTokens)})${cost}`;
+}
+
+export async function loadUsageTotals(): Promise<UsageTotals> {
+  const s = await chrome.storage.local.get(USAGE_KEY);
+  return (s[USAGE_KEY] as UsageTotals | undefined) ?? { since: Date.now(), requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 };
+}
+
+export async function resetUsageTotals(): Promise<void> {
+  await chrome.storage.local.remove(USAGE_KEY);
+}
+
+async function addUsageTotals(u: UsageStats): Promise<void> {
+  if (u.requests === 0) return;
+  const t = await loadUsageTotals();
+  await chrome.storage.local.set({
+    [USAGE_KEY]: {
+      since: t.since,
+      requests: t.requests + u.requests,
+      inputTokens: t.inputTokens + u.inputTokens,
+      outputTokens: t.outputTokens + u.outputTokens,
+      costUsd: t.costUsd + (u.costUsd ?? 0),
+    } satisfies UsageTotals,
+  });
 }
 
 // messageId -> summary of that mail's whole conversation (so every mail of a
@@ -90,6 +163,7 @@ export async function summarizeMessages(
   let done = 0;
   let fatal: LlmAuthError | null = null;
   let dirty = false;
+  const usage = opts.usage ?? newUsageStats();
 
   const byThread = new Map<string, DayMessage[]>();
   for (const m of messages) {
@@ -110,12 +184,22 @@ export async function summarizeMessages(
         const cached = cache[key];
         if (cached && cached.startsWith(thread.lastMessageId + SEP)) {
           summary = cached.slice(thread.lastMessageId.length + SEP.length);
+          usage.reused++;
         } else {
           const text = await callLlm(
             cfg.active,
             provider,
             SYSTEM_PROMPT,
             `<thread>\n제목: ${rows[0].subject}\n\n${thread.text}\n</thread>`,
+            {
+              onUsage: (u) => {
+                usage.requests++;
+                usage.inputTokens += u.inputTokens;
+                usage.outputTokens += u.outputTokens;
+                const cost = estimateCostUsd(u, provider);
+                if (cost !== null) usage.costUsd = (usage.costUsd ?? 0) + cost;
+              },
+            },
           );
           summary = tidy(text);
           if (summary) {
@@ -137,6 +221,8 @@ export async function summarizeMessages(
   });
 
   if (dirty) await saveCache(cache).catch(() => {});
+  // Tokens were spent even if the run was cancelled or stopped by a bad key.
+  await addUsageTotals(usage).catch(() => {});
   if (fatal) throw fatal;
   return result;
 }

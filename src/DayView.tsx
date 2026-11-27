@@ -4,7 +4,7 @@ import { loadAddressInfo, listMessagesInRange, type DayMessage, type RangeStats 
 import { loadTrackerConfig, loadTracked, fetchHits, findTracked, realHits } from "./tracking";
 import { downloadExport, type ExportFormat, type ExportOptions } from "./exportMessages";
 import { activeProvider, loadAiConfig, providerLabel } from "./aiProviders";
-import { countUncached, summarizeMessages } from "./aiSummary";
+import { countUncached, formatTokens, newUsageStats, summarizeMessages } from "./aiSummary";
 import KeywordChips from "./KeywordChips";
 import { DEFAULT_GROUPS, OTHER_GROUP, groupOf, loadGroups, saveGroups, type MailGroup } from "./groups";
 import "./DayView.css";
@@ -41,13 +41,16 @@ export default function DayView() {
   const [messages, setMessages] = useState<DayMessage[] | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // "" = every address of mine; otherwise one account (primary or alias).
-  const [account, setAccount] = useState("");
+  // Which of my addresses to look at (primary, aliases, extras); empty = all of them.
+  const [accounts, setAccounts] = useState<string[]>([]);
+  const accountsKey = accounts.join(",");
   const [myAccounts, setMyAccounts] = useState<string[]>([]);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("csv");
   const [withSummary, setWithSummary] = useState(false);
   const [summarizing, setSummarizing] = useState<{ done: number; total: number } | null>(null);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
+  // Tokens / estimated cost of the last AI summary run.
+  const [usageMsg, setUsageMsg] = useState<string | null>(null);
   const cancelRef = useRef(false);
   const [groups, setGroups] = useState<MailGroup[]>(DEFAULT_GROUPS);
   const [groupFilter, setGroupFilter] = useState("all");
@@ -64,8 +67,9 @@ export default function DayView() {
     // The connected Gmail account plus its send-as aliases and the extras added in 설정.
     Promise.all([loadAddressInfo(), loadAliasConfig()])
       .then(([info, cfg]) => {
-        const excluded = new Set(cfg.excluded.map(normalizeAddress));
-        const list = [info.primary, ...info.sendAs.filter((a) => !excluded.has(a)), ...cfg.extra.map(normalizeAddress)];
+        // Every address I can send from, even one excluded from "me" in 설정 (e.g. a shared
+        // group address): mail I sent from it must stay findable here.
+        const list = [info.primary, ...info.sendAs, ...cfg.extra.map(normalizeAddress)];
         setMyAccounts([...new Set(list)]);
       })
       .catch(() => {});
@@ -85,7 +89,7 @@ export default function DayView() {
     setProgress(null);
     setStats(null);
     listMessagesInRange(from, to, sender, {
-      account,
+      accounts: accountsKey ? accountsKey.split(",") : [],
       isCancelled: () => cancelled,
       onProgress: (done, total) => !cancelled && setProgress({ done, total }),
     })
@@ -100,7 +104,7 @@ export default function DayView() {
     return () => {
       cancelled = true;
     };
-  }, [from, to, valid, sender, account]);
+  }, [from, to, valid, sender, accountsKey]);
 
   async function loadReads(msgs: DayMessage[], isCancelled: () => boolean) {
     try {
@@ -156,6 +160,7 @@ export default function DayView() {
 
   async function runExport() {
     setExportMsg(null);
+    setUsageMsg(null);
     const opts: ExportOptions = { groupOf: (m) => groupOf(m, groups) };
     if (withSummary) {
       const cfg = await loadAiConfig();
@@ -177,17 +182,31 @@ export default function DayView() {
       }
       cancelRef.current = false;
       setSummarizing({ done: 0, total: shown.length });
+      const usage = newUsageStats();
+      // Tokens are spent even when a run is cancelled or stopped by a bad key.
+      const showUsage = () => {
+        if (usage.requests === 0 && usage.reused === 0) return;
+        const detail = `요청 ${usage.requests}건, 저장본 사용 ${usage.reused}건`;
+        setUsageMsg(
+          usage.requests === 0
+            ? `AI 사용량: 없음 (${detail})`
+            : `AI 사용량: ${formatTokens(usage.inputTokens, usage.outputTokens, usage.costUsd)} (${detail})`,
+        );
+      };
       try {
         opts.summaries = await summarizeMessages(shown, cfg, {
           isCancelled: () => cancelRef.current,
           onProgress: (done, total) => setSummarizing({ done, total }),
+          usage,
         });
       } catch (e) {
         setSummarizing(null);
         setExportMsg(e instanceof Error ? e.message : String(e));
+        showUsage();
         return;
       }
       setSummarizing(null);
+      showUsage();
       if (cancelRef.current) {
         setExportMsg("요약을 취소했습니다. 파일은 만들지 않았습니다.");
         return;
@@ -226,21 +245,29 @@ export default function DayView() {
         <span className="dv-sep">~</span>
         <input type="date" className="dv-date" value={to} max={todayStr} onChange={(e) => changeTo(e.target.value)} />
       </div>
-      <div className="dv-picker">
-        <select
-          className="dv-date"
-          value={account}
-          onChange={(e) => setAccount(e.target.value)}
-          aria-label="내 계정"
-          title="이 계정으로 받았거나 이 계정에서 보낸 메일만 봅니다"
+      <div className="dv-accounts" role="group" aria-label="내 계정">
+        <button
+          type="button"
+          className={`dv-preset${accounts.length === 0 ? " active" : ""}`}
+          onClick={() => setAccounts([])}
+          title="내 모든 주소의 받은 메일과 보낸 메일"
         >
-          <option value="">내 계정: 전체 (받은 메일 + 보낸 메일)</option>
-          {myAccounts.map((a) => (
-            <option key={a} value={a}>
-              {a}
-            </option>
-          ))}
-        </select>
+          내 계정 전체
+        </button>
+        {myAccounts.map((a) => (
+          <label
+            key={a}
+            className={`dv-account${accounts.includes(a) ? " on" : ""}`}
+            title="체크한 주소로 받았거나 그 주소에서 보낸 메일만 봅니다 (여러 개 선택 가능)"
+          >
+            <input
+              type="checkbox"
+              checked={accounts.includes(a)}
+              onChange={(e) => setAccounts(e.target.checked ? [...accounts, a] : accounts.filter((x) => x !== a))}
+            />
+            {a}
+          </label>
+        ))}
       </div>
       <div className="dv-picker">
         <input
@@ -357,7 +384,7 @@ export default function DayView() {
           AI 요약 포함
         </label>
       </div>
-      {(summarizing || exportMsg) && (
+      {(summarizing || exportMsg || usageMsg) && (
         <div className="dv-export-status">
           {summarizing && (
             <>
@@ -370,6 +397,7 @@ export default function DayView() {
             </>
           )}
           {!summarizing && exportMsg && <span className="dv-error-inline">{exportMsg}</span>}
+          {!summarizing && usageMsg && <span className="text-muted">{usageMsg}</span>}
         </div>
       )}
 

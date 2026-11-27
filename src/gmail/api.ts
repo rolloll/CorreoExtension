@@ -527,13 +527,25 @@ export async function loadAddressInfo(): Promise<AddressInfo> {
   return info;
 }
 
-async function loadMyAddresses(): Promise<{ primary: string; all: Set<string> }> {
+// all:      the addresses that count as "me" (send-as aliases minus the ones the
+//           user excluded in 설정, plus the extras).
+// sendFrom: every address I can send from, excluded or not. A shared address
+//           the user excluded from "me" (e.g. a group address) is still one
+//           that I send from, so mail I wrote from it must count as sent.
+async function loadMyAddresses(): Promise<{ primary: string; all: Set<string>; sendFrom: Set<string> }> {
   const [info, cfg] = await Promise.all([loadAddressInfo(), loadAliasConfig()]);
   const excluded = new Set(cfg.excluded.map(normalizeAddress));
   const all = new Set<string>([info.primary]);
-  for (const a of info.sendAs) if (!excluded.has(a)) all.add(a);
-  for (const a of cfg.extra) all.add(normalizeAddress(a));
-  return { primary: info.primary, all };
+  const sendFrom = new Set<string>([info.primary]);
+  for (const a of info.sendAs) {
+    sendFrom.add(a);
+    if (!excluded.has(a)) all.add(a);
+  }
+  for (const a of cfg.extra) {
+    all.add(normalizeAddress(a));
+    sendFrom.add(normalizeAddress(a));
+  }
+  return { primary: info.primary, all, sendFrom };
 }
 
 const SENDER_HEADERS = ["From", "To", "Cc", "Subject", "X-Original-Sender", "X-Original-From", "List-Id", "Delivered-To"];
@@ -630,7 +642,7 @@ async function saveDigestStore(store: DigestStore): Promise<void> {
 }
 
 export async function syncActivity(days: number): Promise<ActivitySummary> {
-  const { primary: myEmail, all: myAddrs } = await loadMyAddresses();
+  const { primary: myEmail, all: myAddrs, sendFrom } = await loadMyAddresses();
 
   const labelData = await gmailJson<{ labels?: LabelOut[] }>("/labels", "라벨 목록 조회");
   const resolvedLabelId = findLabelByLogicalName(labelData.labels || [], RESOLVED_LABEL_NAME)?.id;
@@ -718,7 +730,7 @@ export async function syncActivity(days: number): Promise<ActivitySummary> {
 
     for (const msg of thread.messages) {
       const fromAddrs = senderAddresses(msg, myAddrs);
-      const isMine = isMyMessage(msg, fromAddrs, myAddrs);
+      const isMine = isMyMessage(msg, fromAddrs, sendFrom);
       const ts = msg.internalDate ? parseInt(msg.internalDate, 10) : null;
 
       if (isMine) {
@@ -753,7 +765,7 @@ export async function syncActivity(days: number): Promise<ActivitySummary> {
 
     const lastMsg = thread.messages[thread.messages.length - 1];
     const lastFromAddrs = senderAddresses(lastMsg, myAddrs);
-    const lastIsMine = isMyMessage(lastMsg, lastFromAddrs, myAddrs);
+    const lastIsMine = isMyMessage(lastMsg, lastFromAddrs, sendFrom);
     const lastTs = lastMsg.internalDate ? parseInt(lastMsg.internalDate, 10) : null;
 
     // Inbox-wide tag: was I addressed directly (To) or only Cc'd, and does
@@ -922,8 +934,9 @@ export interface RangeStats {
 }
 
 export interface RangeOptions {
-  // One of my own addresses: only mail received at it or sent from it.
-  account?: string;
+  // My own addresses to look at (one or several): only mail received at one of
+  // them or sent from one of them. Empty = all of them.
+  accounts?: string[];
   isCancelled?: () => boolean;
   onProgress?: (done: number, total: number) => void;
 }
@@ -1161,7 +1174,7 @@ export async function listMessagesInRange(
   do {
     const params = new URLSearchParams({
       // The exact checks happen below on the real headers.
-      q: buildRangeQuery(startSec, endSec, counterpart, opts.account ?? ""),
+      q: buildRangeQuery(startSec, endSec, counterpart, opts.accounts ?? []),
       maxResults: "500",
     });
     if (pageToken) params.set("pageToken", pageToken);
@@ -1172,7 +1185,7 @@ export async function listMessagesInRange(
     ids.push(...(data.messages || []).map((x) => x.id));
     pageToken = data.nextPageToken;
   } while (pageToken && ids.length < RANGE_MESSAGE_CAP);
-  const { all: myAddrs } = await myAddrsPromise;
+  const { all: myAddrs, sendFrom } = await myAddrsPromise;
   const truncated = ids.length >= RANGE_MESSAGE_CAP && !!pageToken;
   ids = ids.slice(0, RANGE_MESSAGE_CAP);
 
@@ -1203,12 +1216,12 @@ export async function listMessagesInRange(
     const to = extractAddresses(headerValue(msg, "To") || "");
     const cc = extractAddresses(headerValue(msg, "Cc") || "");
     // A group copy whose From is my alias is "received", not "sent".
-    const isMine = isMyMessage(msg, from, myAddrs);
+    const isMine = isMyMessage(msg, from, sendFrom);
     const delivered = headerValues(msg, "Delivered-To");
-    if (!matchesAccount(opts.account ?? "", isMine, from, to, cc, delivered)) continue;
-    if (!matchesCounterpart(counterpart, isMine, from, to, cc, myAddrs)) continue;
+    if (!matchesAccount(opts.accounts ?? [], isMine, from, to, cc, delivered)) continue;
+    if (!matchesCounterpart(counterpart, isMine, from, to, cc, sendFrom)) continue;
     const peers = isMine
-      ? [...to, ...(to.length === 0 ? cc : [])].filter((a) => !myAddrs.has(a.addr))
+      ? [...to, ...(to.length === 0 ? cc : [])].filter((a) => !sendFrom.has(a.addr))
       : from;
     messages.push({
       messageId: msg.id,

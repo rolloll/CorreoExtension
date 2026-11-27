@@ -11,13 +11,21 @@ export function cleanTerm(s: string): string {
   return s.trim().replace(/["{}()]/g, "").toLowerCase();
 }
 
+// The chosen accounts, cleaned and de-duplicated. Empty = every address of mine.
+export function cleanAccounts(accountsRaw: string[]): string[] {
+  return [...new Set(accountsRaw.map(cleanTerm).filter(Boolean))];
+}
+
 // Gmail search for the range, narrowed by the chosen filters. {a b} is OR, and
 // separate groups are AND-ed. `deliveredto:` is the account that actually
 // received the message (covers aliases / group delivery where it isn't in To).
-export function buildRangeQuery(startSec: number, endSec: number, counterpartRaw: string, accountRaw: string): string {
+// With several accounts selected, mail of any of them matches.
+export function buildRangeQuery(startSec: number, endSec: number, counterpartRaw: string, accountsRaw: string[]): string {
   let q = `after:${startSec} before:${endSec} -in:draft`;
-  const account = cleanTerm(accountRaw);
-  if (account) q += ` {from:${account} to:${account} cc:${account} deliveredto:${account}}`;
+  const accounts = cleanAccounts(accountsRaw);
+  if (accounts.length) {
+    q += ` {${accounts.map((a) => `from:${a} to:${a} cc:${a} deliveredto:${a}`).join(" ")}}`;
+  }
   const who = cleanTerm(counterpartRaw);
   // The bare-text term catches mail reflected by a group, whose From is the group.
   if (who) q += ` {from:(${who}) to:(${who}) cc:(${who}) "${who}"}`;
@@ -28,20 +36,21 @@ export function buildRangeQuery(startSec: number, endSec: number, counterpartRaw
 // Sent mail belongs to the account it was sent FROM; received mail to the
 // account it was addressed or delivered TO.
 export function matchesAccount(
-  accountRaw: string,
+  accountsRaw: string[],
   isMine: boolean,
   from: Addr[],
   to: Addr[],
   cc: Addr[],
   deliveredTo: string[],
 ): boolean {
-  const account = cleanTerm(accountRaw);
-  if (!account) return true;
-  if (isMine) return from.some((a) => a.addr === account);
+  const accounts = cleanAccounts(accountsRaw);
+  if (accounts.length === 0) return true;
+  const chosen = new Set(accounts);
+  if (isMine) return from.some((a) => chosen.has(a.addr));
   return (
-    to.some((a) => a.addr === account) ||
-    cc.some((a) => a.addr === account) ||
-    deliveredTo.some((d) => d.trim().toLowerCase() === account)
+    to.some((a) => chosen.has(a.addr)) ||
+    cc.some((a) => chosen.has(a.addr)) ||
+    deliveredTo.some((d) => chosen.has(d.trim().toLowerCase()))
   );
 }
 

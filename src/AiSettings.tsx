@@ -12,6 +12,7 @@ import {
   type ProviderConfig,
   type ProviderId,
 } from "./aiProviders";
+import { formatCostUsd, loadUsageTotals, resetUsageTotals, type UsageTotals } from "./aiSummary";
 
 // Settings block: one saved key per AI service, the selected one summarizes
 // mail in the date-range export.
@@ -25,12 +26,28 @@ export default function AiSettings() {
   const [modelsMsg, setModelsMsg] = useState<string | null>(null);
   const [loadingModels, setLoadingModels] = useState(false);
 
+  const [totals, setTotals] = useState<UsageTotals | null>(null);
+
   useEffect(() => {
     loadAiConfig().then((c) => {
       setCfg(c);
       setLoaded(true);
     });
+    void loadUsageTotals().then(setTotals);
   }, []);
+
+  // "" clears the price; anything that isn't a non-negative number is ignored.
+  function setPrice(field: "priceIn" | "priceOut", text: string) {
+    if (text.trim() === "") return updateCurrent({ [field]: undefined });
+    const n = Number(text);
+    if (Number.isFinite(n) && n >= 0) updateCurrent({ [field]: n });
+  }
+
+  async function resetTotals() {
+    if (!window.confirm("누적 사용량을 0으로 되돌립니다. 계속할까요?")) return;
+    await resetUsageTotals();
+    setTotals(await loadUsageTotals());
+  }
 
   const info = PROVIDERS.find((p) => p.id === cfg.active) ?? PROVIDERS[0];
   const current = cfg.providers[cfg.active];
@@ -169,6 +186,33 @@ export default function AiSettings() {
         모델 이름은 서비스에서 자주 바뀌고 종료되기도 합니다. <b>모델 목록 불러오기</b>를 누르면 이 키로 지금 쓸 수 있는 모델을 서비스에서 직접
         받아 오고, 입력칸을 눌러 고를 수 있습니다. 메일이 많으면 가볍고 빠른 모델(이름에 flash, mini, haiku가 들어간 것)이 저렴합니다.
       </div>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}>
+        <span className="text-muted" style={{ fontSize: 12 }}>
+          단가 (US$ / 100만 토큰)
+        </span>
+        <input
+          className="input"
+          style={{ width: 90 }}
+          inputMode="decimal"
+          placeholder="입력"
+          title="입력(프롬프트) 토큰 100만 개당 가격, 달러"
+          value={current.priceIn ?? ""}
+          onChange={(e) => setPrice("priceIn", e.target.value)}
+        />
+        <input
+          className="input"
+          style={{ width: 90 }}
+          inputMode="decimal"
+          placeholder="출력"
+          title="출력(응답) 토큰 100만 개당 가격, 달러"
+          value={current.priceOut ?? ""}
+          onChange={(e) => setPrice("priceOut", e.target.value)}
+        />
+      </div>
+      <div className="st-toggle-hint" style={{ marginBottom: 6 }}>
+        토큰 수는 서비스가 알려 주는 값을 그대로 보여 줍니다. 금액은 모델마다 단가가 달라 직접 입력한 단가로만 계산하는 <b>예상치</b>이며, 실제 청구액은
+        서비스 사이트에서 확인하세요. 단가는 서비스의 요금표(입력/출력 각각 100만 토큰당 달러)를 보고 넣으세요.
+      </div>
       <button className="btn btn-secondary" disabled={!current.apiKey || !current.model || testing} onClick={test}>
         연결 테스트
       </button>
@@ -176,6 +220,16 @@ export default function AiSettings() {
         <span className="text-muted" style={{ marginLeft: 8, fontSize: 12 }}>
           {testMsg}
         </span>
+      )}
+      {totals && (
+        <div className="text-muted" style={{ fontSize: 12, marginTop: 10 }}>
+          누적 사용량 ({new Date(totals.since).toLocaleDateString("ko-KR")}부터): 요청 {totals.requests.toLocaleString("ko-KR")}건 · 입력{" "}
+          {totals.inputTokens.toLocaleString("ko-KR")} · 출력 {totals.outputTokens.toLocaleString("ko-KR")} 토큰
+          {totals.costUsd > 0 && ` · 예상 ${formatCostUsd(totals.costUsd)} (단가를 입력해 둔 요청만 합산)`}{" "}
+          <button className="btn btn-secondary" style={{ marginLeft: 6 }} onClick={resetTotals}>
+            초기화
+          </button>
+        </div>
       )}
     </div>
   );

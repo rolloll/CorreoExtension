@@ -10,6 +10,11 @@ export interface ProviderConfig {
   // Only for "custom": an OpenAI-compatible base URL (OpenRouter, Groq,
   // DeepSeek, a local server, ...), e.g. https://api.groq.com/openai/v1
   baseUrl?: string;
+  // Optional unit prices in US dollars per 1,000,000 tokens, typed in by the
+  // user (prices differ per model and change, so none are built in). Only used
+  // to turn the token counts into an estimated cost.
+  priceIn?: number;
+  priceOut?: number;
 }
 
 export interface AiConfig {
@@ -127,10 +132,24 @@ function isKeyRejected(status: number, body: string): boolean {
   return status === 401 || status === 403 || (status === 400 && /API[_ ]KEY[_ ]INVALID|api key not valid/i.test(body));
 }
 
+// Tokens the service reports for one request.
+export interface LlmUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+// Estimated cost in US dollars, or null when no unit price was entered.
+export function estimateCostUsd(usage: LlmUsage, cfg: ProviderConfig): number | null {
+  if (!(cfg.priceIn! >= 0) || !(cfg.priceOut! >= 0)) return null;
+  return (usage.inputTokens * (cfg.priceIn as number) + usage.outputTokens * (cfg.priceOut as number)) / 1_000_000;
+}
+
 export interface CallOptions {
   // Retries after a 429 / 5xx. The connection test uses 0 so it answers at once.
   retries?: number;
   timeoutMs?: number;
+  // Called with the token counts of a successful request.
+  onUsage?: (usage: LlmUsage) => void;
 }
 
 // Gemini puts the wait it wants in the error body: "retryDelay": "21s".
@@ -211,6 +230,13 @@ async function callAnthropic(cfg: ProviderConfig, system: string, user: string, 
       ...(supportsEffort ? { output_config: { effort: "low" as const } } : {}),
     });
     if (resp.stop_reason === "refusal") throw new Error("모델이 이 메일의 요약을 거부했습니다.");
+    const u = resp.usage;
+    if (u) {
+      opts.onUsage?.({
+        inputTokens: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0),
+        outputTokens: u.output_tokens ?? 0,
+      });
+    }
     return resp.content
       .filter((b): b is Anthropic.TextBlock => b.type === "text")
       .map((b) => b.text)
@@ -235,7 +261,13 @@ async function callOpenAiCompatible(base: string, cfg: ProviderConfig, system: s
       ],
     },
     opts,
-  )) as { choices?: { message?: { content?: string | null } }[] };
+  )) as {
+    choices?: { message?: { content?: string | null } }[];
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
+  if (data.usage) {
+    opts.onUsage?.({ inputTokens: data.usage.prompt_tokens ?? 0, outputTokens: data.usage.completion_tokens ?? 0 });
+  }
   return data.choices?.[0]?.message?.content ?? "";
 }
 
@@ -248,7 +280,17 @@ async function callGemini(cfg: ProviderConfig, system: string, user: string, opt
       contents: [{ role: "user", parts: [{ text: user }] }],
     },
     opts,
-  )) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+  )) as {
+    candidates?: { content?: { parts?: { text?: string }[] } }[];
+    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number };
+  };
+  if (data.usageMetadata) {
+    // Thinking tokens are billed as output.
+    opts.onUsage?.({
+      inputTokens: data.usageMetadata.promptTokenCount ?? 0,
+      outputTokens: (data.usageMetadata.candidatesTokenCount ?? 0) + (data.usageMetadata.thoughtsTokenCount ?? 0),
+    });
+  }
   return (data.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("\n");
 }
 
